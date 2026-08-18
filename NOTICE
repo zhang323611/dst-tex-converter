@@ -1,0 +1,25 @@
+DST Tex Converter 第三方组件声明
+====================================
+
+本工具依赖以下第三方开源组件：
+
+1. astc-encoder
+   - 来源：https://github.com/ARM-software/astc-encoder
+   - 许可：Apache License 2.0
+   - 版权：Copyright (c) 2013-2024 Arm Limited
+   - 位置：third_party/astcenc/
+
+2. squish
+   - 来源：https://sourceforge.net/projects/libsquish/
+   - 许可：MIT License
+   - 版权：Copyright (c) 2006 Simon Brown
+   - 位置：third_party/squish/
+
+3. stb_image_write
+   - 来源：https://github.com/nothings/stb
+   - 许可：public domain / MIT
+   - 版权：Copyright (c) 2017 Sean Barrett
+   - 位置：native/stb_image_write.h
+
+以上组件的完整许可文本均保留在其各自目录的 LICENSE 文件中。
+本工具的其余代码（app/、native/ 除 stb 外、build_apk.sh）采用 MIT License，见 LICENSE。

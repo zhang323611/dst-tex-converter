@@ -1,0 +1,18 @@
+# 构建产物
+build/
+*.apk
+*.so
+
+# 签名密钥（切勿提交）
+*.jks
+*.keystore
+
+# 压缩包
+*.tar
+*.tar.gz
+*.zip
+
+# IDE
+.idea/
+*.iml
+.vscode/
