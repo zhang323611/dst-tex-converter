@@ -17,6 +17,7 @@ import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ListView;
@@ -54,6 +55,7 @@ public class TexConverter extends Activity {
     private String blockSize = "8x8";
     private String quality = "medium";
     private String convertMode = "auto"; // auto / png2tex / tex2png / dxt2astc
+    private boolean autoBackup = false; // 自动备份 .bak，默认关闭
     private SharedPreferences prefs;
     private String highlightName = null; // 搜索跳转后高亮的文件名
 
@@ -61,6 +63,7 @@ public class TexConverter extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("texconv", MODE_PRIVATE);
+        autoBackup = prefs.getBoolean("autoBackup", false);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -256,6 +259,13 @@ public class TexConverter extends Activity {
         }
         panel.addView(rgQual);
 
+        // 自动备份 .bak
+        final CheckBox cbBackup = new CheckBox(this);
+        cbBackup.setText("自动备份 .bak（转换前备份原文件，默认关闭）");
+        cbBackup.setChecked(autoBackup);
+        cbBackup.setPadding(0, 12, 0, 0);
+        panel.addView(cbBackup);
+
         new AlertDialog.Builder(this)
             .setTitle("转换模式设置")
             .setView(panel)
@@ -266,6 +276,8 @@ public class TexConverter extends Activity {
                 if (m >= 0 && m < modeVals.length) convertMode = modeVals[m];
                 if (s >= 0 && s < sizeVals.length) blockSize = sizeVals[s];
                 if (q >= 0 && q < qualVals.length) quality = qualVals[q];
+                autoBackup = cbBackup.isChecked();
+                prefs.edit().putBoolean("autoBackup", autoBackup).apply();
                 updateStatus();
             })
             .setNegativeButton("取消", null).show();
@@ -707,11 +719,14 @@ public class TexConverter extends Activity {
         runAstcenc("-cl", flipPng.getAbsolutePath(), astc.getAbsolutePath(), blockSize, "-" + quality);
         byte[] raw = stripAstcHeader(readFile(astc));
         byte[] ktex = packKtex(wh[0], wh[1], raw);
-        // 备份原文件为 .bak（仅首次），然后替换原文件
-        File bak = new File(tex.getAbsolutePath() + ".bak");
-        if (!bak.exists()) copyFile(tex, bak);
+        // 按设置决定是否备份原文件为 .bak（仅首次），然后替换原文件
+        File bak = null;
+        if (autoBackup) {
+            bak = new File(tex.getAbsolutePath() + ".bak");
+            if (!bak.exists()) copyFile(tex, bak);
+        }
         writeFile(tex, ktex);
-        return "已替换，原文件→" + bak.getName();
+        return autoBackup ? "已替换，原文件→" + bak.getName() : "已替换（未备份）";
     }
 
     private String texToPng(File tex) throws Exception {
@@ -754,8 +769,10 @@ public class TexConverter extends Activity {
         }
         zos.close();
         zf.close();
-        File bak = new File(zip.getAbsolutePath() + ".bak");
-        if (!bak.exists()) copyFile(zip, bak);
+        if (autoBackup) {
+            File bak = new File(zip.getAbsolutePath() + ".bak");
+            if (!bak.exists()) copyFile(zip, bak);
+        }
         copyFile(tmp, zip);
         tmp.delete();
         return "zip 内 " + ok + " 个 tex 已转换";
