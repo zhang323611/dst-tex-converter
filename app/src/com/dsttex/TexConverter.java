@@ -342,10 +342,52 @@ public class TexConverter extends Activity {
     }
 
     private void showAbout() {
+        final String repo = "https://github.com/zhang323611/dst-tex-converter";
+        String v = appVersion();
         new AlertDialog.Builder(this)
-            .setTitle("纹理转换器")
-            .setMessage("饥荒手机版纹理转换工具\n\n支持：\n· DXT1/3/5 → ASTC(手机版)\n· PNG → ASTC\n· ASTC → PNG\n· zip 内批量转换\n\nASTC 8x8(2bpp) 为手机版标准格式，占用约为 RGBA 的 1/16。")
-            .setPositiveButton("确定", null).show();
+            .setTitle("关于")
+            .setMessage("饥荒手机版纹理转换工具" + (v.isEmpty() ? "" : "  v" + v) + "\n\n"
+                + "支持：\n"
+                + "· DXT1/3/5 → ASTC(手机版)\n"
+                + "· PNG → ASTC\n"
+                + "· ASTC → PNG\n"
+                + "· zip 内批量转换\n\n"
+                + "ASTC 8x8(2bpp) 为手机版标准格式，占用约为 RGBA 的 1/16。\n\n"
+                + "作者 QQ：599739709\n"
+                + "GitHub：zhang323611/dst-tex-converter\n"
+                + repo)
+            .setPositiveButton("访问仓库", (d, w) -> openUrl(repo))
+            .setNeutralButton("复制链接", (d, w) -> copyToClipboard(repo))
+            .setNegativeButton("关闭", null)
+            .show();
+    }
+
+    // 从清单读取版本号,避免手改漂移
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void openUrl(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception e) {
+            toast("无法打开链接");
+        }
+    }
+
+    private void copyToClipboard(String text) {
+        try {
+            android.content.ClipboardManager cm =
+                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("link", text));
+            toast("已复制到剪贴板");
+        } catch (Exception e) {
+            toast("复制失败");
+        }
     }
 
     // ---------- 设置 ----------
