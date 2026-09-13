@@ -106,15 +106,21 @@ print("classes.dex 和 native 库已打包")
 PYEOF
 
 # ---------- 签名 ----------
-echo "=== 签名 ==="
-if [ ! -f "$WORK/keystore.jks" ]; then
-  keytool -genkeypair -keystore "$WORK/keystore.jks" -alias dsttex \
+# 密钥固定在仓库外, 避免每次构建重新生成 -> 否则用户无法覆盖升级
+KS="${DSTTEX_KEYSTORE:-$HOME/.dsttex/dsttex.jks}"
+KS_PASS="${DSTTEX_KS_PASS:-123456}"
+KS_ALIAS="${DSTTEX_KS_ALIAS:-dsttex}"
+mkdir -p "$(dirname "$KS")"
+if [ ! -f "$KS" ]; then
+  echo "=== 首次生成签名密钥: $KS ==="
+  keytool -genkeypair -keystore "$KS" -alias "$KS_ALIAS" \
     -keyalg RSA -keysize 2048 -validity 10000 \
-    -storepass 123456 -keypass 123456 -dname "CN=DSTTex" -noprompt
+    -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=DSTTex" -noprompt
 fi
 "$BT/zipalign" -f 4 "$WORK/unsigned.apk" "$WORK/aligned.apk"
-"$BT/apksigner" sign --ks "$WORK/keystore.jks" --ks-pass pass:123456 --key-pass pass:123456 \
+"$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
   --out "$ROOT/dst_tex_converter.apk" "$WORK/aligned.apk"
+echo "签名密钥: $KS"
 
 echo "=== 完成 ==="
 ls -la "$ROOT/dst_tex_converter.apk"

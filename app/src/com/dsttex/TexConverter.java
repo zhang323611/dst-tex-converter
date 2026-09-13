@@ -76,6 +76,8 @@ public class TexConverter extends Activity {
     private LinearLayout crumbBar;
     private FrameLayout drawerLayer;
     private LinearLayout drawerPanel;
+    // 目录子项数缓存(browse 时一次性统计, 避免 getView 每帧 listFiles)
+    private final java.util.HashMap<String, Integer> dirCount = new java.util.HashMap<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -682,13 +684,20 @@ public class TexConverter extends Activity {
             curDir = dir;
             updateBreadcrumb();
             entries.clear();
+            dirCount.clear();
             File[] fs = dir.listFiles();
             if (fs != null) {
                 java.util.Arrays.sort(fs, (a, b) -> {
                     if (a.isDirectory() != b.isDirectory()) return a.isDirectory() ? -1 : 1;
                     return a.getName().compareToIgnoreCase(b.getName());
                 });
-                for (File f : fs) entries.add(f);
+                for (File f : fs) {
+                    entries.add(f);
+                    if (f.isDirectory()) {
+                        File[] ch = f.listFiles();
+                        dirCount.put(f.getAbsolutePath(), ch == null ? -1 : ch.length);
+                    }
+                }
             }
             listView.setAdapter(new FileAdapter());
             listView.clearChoices();
@@ -785,10 +794,10 @@ public class TexConverter extends Activity {
             ic.setBackground(rounded(color, 9f));
             nm.setText(f.getName());
             if (f.isDirectory()) {
-                File[] ch = f.listFiles();
-                mt.setText("文件夹" + (ch != null ? " \u00b7 " + ch.length + " 项" : ""));
+                Integer cnt = dirCount.get(f.getAbsolutePath());
+                mt.setText(cnt == null || cnt < 0 ? "文件夹" : "文件夹 · " + cnt + " 项");
             } else {
-                mt.setText(humanSize(f.length()) + " \u00b7 " +
+                mt.setText(humanSize(f.length()) + " · " +
                     new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
                         .format(new java.util.Date(f.lastModified())));
             }
@@ -995,18 +1004,26 @@ public class TexConverter extends Activity {
         java.util.Enumeration<? extends ZipEntry> en = zf.entries();
         while (en.hasMoreElements()) {
             ZipEntry ze = en.nextElement();
-            byte[] data = readAll(zf.getInputStream(ze));
             String n = ze.getName().toLowerCase();
+            ZipEntry ne = new ZipEntry(ze.getName());
+            if (ze.getTime() > 0) ne.setTime(ze.getTime());
+            zos.putNextEntry(ne);
             if (!ze.isDirectory() && n.endsWith(".tex")) {
+                byte[] data = readAll(zf.getInputStream(ze));
                 int comp = readTexCompression(data);
                 if (comp != 24) {
                     data = convertTexBytes(data);
                     ok++;
                 }
+                zos.write(data);
+            } else {
+                // 非 .tex 条目流式拷贝, 避免整包读入内存导致大 zip OOM
+                InputStream in = zf.getInputStream(ze);
+                byte[] buf = new byte[65536];
+                int r;
+                while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
+                in.close();
             }
-            ZipEntry ne = new ZipEntry(ze.getName());
-            zos.putNextEntry(ne);
-            zos.write(data);
             zos.closeEntry();
         }
         zos.close();
