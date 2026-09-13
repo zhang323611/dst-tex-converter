@@ -7,6 +7,11 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.net.Uri;
 import android.app.ProgressDialog;
 import android.os.Bundle;
@@ -59,84 +64,118 @@ public class TexConverter extends Activity {
     private SharedPreferences prefs;
     private String highlightName = null; // 搜索跳转后高亮的文件名
 
+    // ================= MT 风格 UI =================
+    private static final int C_PRIMARY  = 0xFF2B6CB0;
+    private static final int C_BG       = 0xFFF2F4F7;
+    private static final int C_CARD     = 0xFFFFFFFF;
+    private static final int C_TEXT     = 0xFF1F2328;
+    private static final int C_TEXT_SUB = 0xFF8A9099;
+    private static final int C_DIVIDER  = 0xFFEBEEF2;
+    private static final int C_SEL      = 0xFFDCEAFB;
+    private HorizontalScrollView crumbScroll;
+    private LinearLayout crumbBar;
+    private FrameLayout drawerLayer;
+    private LinearLayout drawerPanel;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("texconv", MODE_PRIVATE);
         autoBackup = prefs.getBoolean("autoBackup", false);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(C_BG);
 
-        // Toolbar
+        LinearLayout main = new LinearLayout(this);
+        main.setOrientation(LinearLayout.VERTICAL);
+        root.addView(main, new FrameLayout.LayoutParams(-1, -1));
+
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.setPadding(16, 10, 8, 10);
-        toolbar.setBackgroundColor(0xFF2D5F8A);
+        toolbar.setBackgroundColor(C_PRIMARY);
+        main.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(54)));
+
+        toolbar.addView(topBtn("\u2630", v -> openDrawer()));
         TextView title = new TextView(this);
         title.setText("纹理转换器");
         title.setTextColor(0xFFFFFFFF);
-        title.setTextSize(18);
-        toolbar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        Button btnMenu = new Button(this);
-        btnMenu.setText("⋮");
-        btnMenu.setTextColor(0xFFFFFFFF);
-        btnMenu.setBackgroundColor(0x00000000);
-        btnMenu.setOnClickListener(v -> showMenu(v));
-        toolbar.addView(btnMenu);
-        root.addView(toolbar);
+        title.setTextSize(17);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1);
+        tlp.leftMargin = dp(4);
+        toolbar.addView(title, tlp);
+        toolbar.addView(topBtn("\u2315", v -> showSearch()));
+        toolbar.addView(topBtn("\u22ee", v -> showMenu(v)));
 
-        // 路径栏
-        pathView = new TextView(this);
-        pathView.setTextSize(12);
-        pathView.setPadding(12, 6, 12, 6);
-        pathView.setBackgroundColor(0xFFE8F0F8);
-        pathView.setTextColor(0xFF336699);
-        pathView.setOnClickListener(v -> upDir());
-        root.addView(pathView);
+        LinearLayout crumbWrap = new LinearLayout(this);
+        crumbWrap.setOrientation(LinearLayout.HORIZONTAL);
+        crumbWrap.setGravity(Gravity.CENTER_VERTICAL);
+        crumbWrap.setBackgroundColor(C_CARD);
+        crumbWrap.setPadding(dp(6), 0, dp(6), 0);
+        Button up = topBtn("\u2039", v -> upDir());
+        up.setTextColor(C_PRIMARY);
+        crumbWrap.addView(up);
+        crumbScroll = new HorizontalScrollView(this);
+        crumbScroll.setHorizontalScrollBarEnabled(false);
+        crumbBar = new LinearLayout(this);
+        crumbBar.setOrientation(LinearLayout.HORIZONTAL);
+        crumbBar.setGravity(Gravity.CENTER_VERTICAL);
+        crumbScroll.addView(crumbBar);
+        crumbWrap.addView(crumbScroll, new LinearLayout.LayoutParams(0, -1, 1));
+        main.addView(crumbWrap, new LinearLayout.LayoutParams(-1, dp(40)));
+        main.addView(divider());
 
-        // 文件列表
         listView = new ListView(this);
         listView.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
-        listView.setDividerHeight(1);
+        listView.setDivider(new ColorDrawable(C_DIVIDER));
+        listView.setDividerHeight(dp(1));
+        listView.setBackgroundColor(C_CARD);
+        listView.setSelector(new ColorDrawable(0x00000000));
         listView.setOnItemClickListener(this::onItemClick);
         listView.setOnItemLongClickListener((p, v, pos, id) -> { enterMultiSelect(pos); return true; });
-        root.addView(listView, new LinearLayout.LayoutParams(-1, 0, 1));
+        main.addView(listView, new LinearLayout.LayoutParams(-1, 0, 1));
+        main.addView(divider());
 
-        // 底部操作栏
         actionBar = new LinearLayout(this);
         actionBar.setOrientation(LinearLayout.HORIZONTAL);
         actionBar.setGravity(Gravity.CENTER);
-        actionBar.setPadding(4, 6, 4, 6);
-        actionBar.setBackgroundColor(0xFFF0F0F0);
-        btnToggleAll = new Button(this);
-        btnToggleAll.setText("全选");
-        btnToggleAll.setOnClickListener(v -> toggleAll());
-        actionBar.addView(btnToggleAll);
-        actionBar.addView(smallBtn("转换", v -> convertSelected()));
-        actionBar.addView(smallBtn("重命名", v -> renameSelected()));
-        actionBar.addView(smallBtn("删除", v -> deleteSelected()));
-        actionBar.addView(smallBtn("取消", v -> exitMultiSelect()));
-        actionBar.setVisibility(View.GONE);
-        root.addView(actionBar);
+        actionBar.setBackgroundColor(C_CARD);
+        actionBar.setPadding(dp(2), dp(2), dp(2), dp(2));
+        main.addView(actionBar);
 
-        // 状态栏
         statusView = new TextView(this);
-        statusView.setTextSize(12);
-        statusView.setPadding(12, 6, 12, 8);
-        root.addView(statusView);
+        statusView.setTextSize(11);
+        statusView.setTextColor(C_TEXT_SUB);
+        statusView.setBackgroundColor(C_CARD);
+        statusView.setPadding(dp(12), dp(2), dp(12), dp(6));
+        main.addView(statusView);
+
+        drawerLayer = new FrameLayout(this);
+        drawerLayer.setVisibility(View.GONE);
+        View scrim = new View(this);
+        scrim.setBackgroundColor(0x88000000);
+        scrim.setOnClickListener(v -> closeDrawer());
+        drawerLayer.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
+        drawerPanel = new LinearLayout(this);
+        drawerPanel.setOrientation(LinearLayout.VERTICAL);
+        drawerPanel.setBackgroundColor(C_CARD);
+        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(268), -1);
+        dlp.gravity = Gravity.START;
+        drawerLayer.addView(drawerPanel, dlp);
+        buildDrawer();
+        root.addView(drawerLayer, new FrameLayout.LayoutParams(-1, -1));
 
         setContentView(root);
+        updateActionBar();
 
-        // 请求存储权限
         if (android.os.Build.VERSION.SDK_INT >= 23 &&
                 checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{
                     android.Manifest.permission.READ_EXTERNAL_STORAGE,
                     android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 200);
         }
-        // Android 11+ 引导全文件访问
         if (android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
             new AlertDialog.Builder(this)
                 .setTitle("需要存储权限")
@@ -164,11 +203,122 @@ public class TexConverter extends Activity {
     private static native int nativeAstcenc(String[] args);
     private static native int nativeTex2png(String[] args);
 
-    private Button smallBtn(String label, View.OnClickListener l) {
+    // ================= UI 工具 =================
+    private int dp(int v) {
+        return Math.round(getResources().getDisplayMetrics().density * v);
+    }
+
+    private GradientDrawable rounded(int color, float radiusDp) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(color);
+        g.setCornerRadius(dp((int) radiusDp));
+        return g;
+    }
+
+    private View divider() {
+        View v = new View(this);
+        v.setBackgroundColor(C_DIVIDER);
+        v.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(1)));
+        return v;
+    }
+
+    private Button topBtn(String label, View.OnClickListener l) {
         Button b = new Button(this);
         b.setText(label);
+        b.setTextSize(17);
+        b.setTextColor(0xFFFFFFFF);
+        b.setBackgroundColor(0x00000000);
+        b.setMinWidth(dp(44));
+        b.setMinimumWidth(dp(44));
+        b.setMinHeight(dp(44));
+        b.setMinimumHeight(dp(44));
         b.setOnClickListener(l);
         return b;
+    }
+
+    private Button barBtn(String label, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextSize(13);
+        b.setTextColor(C_PRIMARY);
+        b.setBackgroundColor(0x00000000);
+        b.setPadding(0, dp(8), 0, dp(8));
+        b.setOnClickListener(l);
+        b.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
+        return b;
+    }
+
+    private void buildDrawer() {
+        TextView h = new TextView(this);
+        h.setText("纹理转换器");
+        h.setTextSize(16);
+        h.setTextColor(C_TEXT);
+        h.setPadding(dp(20), dp(24), dp(20), dp(14));
+        drawerPanel.addView(h);
+        drawerPanel.addView(divider());
+        drawerItem("主目录", v -> { closeDrawer(); browse(Environment.getExternalStorageDirectory()); });
+        drawerItem("下载目录", v -> {
+            closeDrawer();
+            File d = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            if (d != null && d.exists()) browse(d); else toast("下载目录不可用");
+        });
+        drawerItem("书签", v -> { closeDrawer(); showBookmarks(); });
+        drawerItem("搜索文件", v -> { closeDrawer(); showSearch(); });
+        drawerItem("把当前目录加为书签", v -> { closeDrawer(); addBookmark(curDir); });
+        drawerItem("转换模式设置", v -> { closeDrawer(); showSettings(); });
+        drawerItem("关于", v -> { closeDrawer(); showAbout(); });
+    }
+
+    private void drawerItem(String label, View.OnClickListener l) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextSize(15);
+        t.setTextColor(C_TEXT);
+        t.setPadding(dp(20), dp(15), dp(20), dp(15));
+        t.setOnClickListener(l);
+        drawerPanel.addView(t);
+    }
+
+    private void openDrawer() {
+        drawerLayer.setVisibility(View.VISIBLE);
+        android.view.animation.TranslateAnimation a =
+            new android.view.animation.TranslateAnimation(-dp(268), 0, 0, 0);
+        a.setDuration(180);
+        drawerPanel.startAnimation(a);
+    }
+
+    private void closeDrawer() {
+        drawerLayer.setVisibility(View.GONE);
+    }
+
+    private void updateBreadcrumb() {
+        if (crumbBar == null) return;
+        crumbBar.removeAllViews();
+        if (curDir == null) return;
+        List<File> chain = new ArrayList<>();
+        File f = curDir;
+        while (f != null) { chain.add(0, f); f = f.getParentFile(); }
+        for (int i = 0; i < chain.size(); i++) {
+            final File seg = chain.get(i);
+            if (i > 0) {
+                TextView sep = new TextView(this);
+                sep.setText("\u203a");
+                sep.setTextSize(13);
+                sep.setTextColor(C_TEXT_SUB);
+                sep.setPadding(dp(3), 0, dp(3), 0);
+                crumbBar.addView(sep);
+            }
+            TextView t = new TextView(this);
+            String nm = seg.getName();
+            if (nm == null || nm.isEmpty()) nm = "/";
+            t.setText(nm);
+            t.setTextSize(13);
+            t.setTextColor(i == chain.size() - 1 ? C_PRIMARY : C_TEXT_SUB);
+            t.setPadding(dp(6), dp(8), dp(6), dp(8));
+            t.setOnClickListener(v -> browse(seg));
+            crumbBar.addView(t);
+        }
+        crumbScroll.post(() -> crumbScroll.fullScroll(View.FOCUS_RIGHT));
     }
 
     // ---------- 菜单 ----------
@@ -391,14 +541,16 @@ public class TexConverter extends Activity {
     private void enterMultiSelect(int pos) {
         multiSelect = true;
         listView.setItemChecked(pos, true);
+        listView.invalidateViews();
         updateActionBar();
     }
 
     private void exitMultiSelect() {
         multiSelect = false;
-        actionBar.setVisibility(View.GONE);
         listView.clearChoices();
+        listView.invalidateViews();
         updateStatus();
+        updateActionBar();
     }
 
     private void toggleAll() {
@@ -408,14 +560,28 @@ public class TexConverter extends Activity {
     }
 
     private void updateActionBar() {
+        if (actionBar == null) return;
+        actionBar.removeAllViews();
         int checked = listView.getCheckedItemCount();
-        actionBar.setVisibility(multiSelect && checked > 0 ? View.VISIBLE : View.GONE);
-        btnToggleAll.setText(checked >= entries.size() ? "反选" : "全选");
+        if (multiSelect && checked > 0) {
+            actionBar.addView(barBtn(checked >= entries.size() ? "反选" : "全选", v -> toggleAll()));
+            actionBar.addView(barBtn("转换", v -> convertSelected()));
+            actionBar.addView(barBtn("重命名", v -> renameSelected()));
+            actionBar.addView(barBtn("删除", v -> deleteSelected()));
+            actionBar.addView(barBtn("退出", v -> exitMultiSelect()));
+        } else {
+            actionBar.addView(barBtn("主页", v -> browse(Environment.getExternalStorageDirectory())));
+            actionBar.addView(barBtn("书签", v -> showBookmarks()));
+            actionBar.addView(barBtn("搜索", v -> showSearch()));
+            actionBar.addView(barBtn("设置", v -> showSettings()));
+        }
     }
 
     @Override
     public void onBackPressed() {
-        if (multiSelect) {
+        if (drawerLayer != null && drawerLayer.getVisibility() == View.VISIBLE) {
+            closeDrawer();
+        } else if (multiSelect) {
             exitMultiSelect();
         } else if (curDir != null && curDir.getParentFile() != null) {
             upDir();
@@ -472,7 +638,7 @@ public class TexConverter extends Activity {
         try {
             if (dir == null || !dir.isDirectory()) { toast("无法访问目录"); return; }
             curDir = dir;
-            pathView.setText("📂 " + dir.getAbsolutePath() + "  (点此返回上级)");
+            updateBreadcrumb();
             entries.clear();
             File[] fs = dir.listFiles();
             if (fs != null) {
@@ -531,26 +697,60 @@ public class TexConverter extends Activity {
                 row = new LinearLayout(TexConverter.this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(12, 10, 12, 10);
+                row.setPadding(dp(12), dp(8), dp(12), dp(8));
+                row.setMinimumHeight(dp(58));
+
+                TextView ic = new TextView(TexConverter.this);
+                ic.setId(3);
+                ic.setGravity(Gravity.CENTER);
+                ic.setTextSize(15);
+                ic.setTextColor(0xFFFFFFFF);
+                ic.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(36), dp(36));
+                ilp.rightMargin = dp(12);
+                row.addView(ic, ilp);
+
+                LinearLayout col = new LinearLayout(TexConverter.this);
+                col.setOrientation(LinearLayout.VERTICAL);
                 TextView nm = new TextView(TexConverter.this);
                 nm.setId(1);
                 nm.setTextSize(15);
-                row.addView(nm, new LinearLayout.LayoutParams(0, -2, 1));
+                nm.setTextColor(C_TEXT);
+                nm.setSingleLine(true);
+                nm.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                col.addView(nm);
                 TextView mt = new TextView(TexConverter.this);
                 mt.setId(2);
                 mt.setTextSize(11);
-                mt.setTextColor(0xFF888888);
-                row.addView(mt);
+                mt.setTextColor(C_TEXT_SUB);
+                mt.setPadding(0, dp(2), 0, 0);
+                col.addView(mt);
+                row.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
             }
             File f = entries.get(pos);
-            TextView name = (TextView) row.findViewById(1);
-            TextView meta = (TextView) row.findViewById(2);
+            TextView ic = (TextView) row.findViewById(3);
+            TextView nm = (TextView) row.findViewById(1);
+            TextView mt = (TextView) row.findViewById(2);
             String n = f.getName().toLowerCase();
-            String icon = f.isDirectory() ? "[D] " : n.endsWith(".tex") ? "[T] " : n.endsWith(".png") ? "[P] " : n.endsWith(".zip") ? "[Z] " : "[F] ";
-            name.setText(icon + f.getName());
-            meta.setText(f.isDirectory() ? "目录" : humanSize(f.length()));
-            if (listView.isItemChecked(pos)) row.setBackgroundColor(0xFFCDE8FF);
-            else row.setBackgroundColor(0x00000000);
+            String letter;
+            int color;
+            if (f.isDirectory()) { letter = "D"; color = 0xFF4A90D9; }
+            else if (n.endsWith(".tex")) { letter = "T"; color = 0xFFE8833A; }
+            else if (n.endsWith(".png")) { letter = "P"; color = 0xFF34A853; }
+            else if (n.endsWith(".zip")) { letter = "Z"; color = 0xFF9B59B6; }
+            else { letter = "F"; color = 0xFF95A1AD; }
+            ic.setText(letter);
+            ic.setBackground(rounded(color, 9f));
+            nm.setText(f.getName());
+            if (f.isDirectory()) {
+                File[] ch = f.listFiles();
+                mt.setText("文件夹" + (ch != null ? " \u00b7 " + ch.length + " 项" : ""));
+            } else {
+                mt.setText(humanSize(f.length()) + " \u00b7 " +
+                    new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                        .format(new java.util.Date(f.lastModified())));
+            }
+            row.setBackgroundColor(listView.isItemChecked(pos) ? C_SEL : 0x00000000);
             return row;
         }
     }
