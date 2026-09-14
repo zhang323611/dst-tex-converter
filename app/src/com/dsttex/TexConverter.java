@@ -81,6 +81,61 @@ public class TexConverter extends Activity {
     // 调试模式: 控制预览画布上的诊断叠层(诊断代码全部保留, 仅按开关显示)
     private boolean debugMode = false;
 
+    // 处理压缩包内嵌的压缩包(逐层递归)
+    private boolean nestedZip = true;
+
+    // 跳过统计通过参数传递(见 int[] skip), 不用实例字段 —— 批量转换为多线程,
+    // 实例字段会被并发调用互相覆盖, 导致提示数字与实际不符。
+
+    // ---------- 运行日志(便于排查转换失败) ----------
+    private static final int LOG_MAX = 500;
+    private static final java.util.ArrayDeque<String> LOG = new java.util.ArrayDeque<>();
+    private static File logFile;
+
+    /** 追加一行日志: 内存环形缓冲 + 落盘(cacheDir/dsh_tex.log) */
+    static synchronized void log(String msg) {
+        String line = new java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS",
+                java.util.Locale.US).format(new java.util.Date()) + "  " + msg;
+        LOG.addLast(line);
+        while (LOG.size() > LOG_MAX) LOG.removeFirst();
+        if (logFile != null) {
+            try {
+                java.io.FileWriter w = new java.io.FileWriter(logFile, true);
+                w.write(line + "\n");
+                w.close();
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 记录异常(含调用栈), 供日志查看 */
+    static void logErr(String tag, Throwable t) {
+        log("!! " + tag + ": " + t);
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        for (String ln : sw.toString().split("\n")) log("    " + ln.trim());
+    }
+
+    static synchronized String logText() {
+        StringBuilder sb = new StringBuilder();
+        for (String l : LOG) sb.append(l).append('\n');
+        return sb.toString();
+    }
+
+    static synchronized void clearLog() {
+        LOG.clear();
+        if (logFile != null) logFile.delete();
+        log("日志已清空");
+    }
+
+    // 临时文件全局序号。
+    // 说明: tempWorkingDir() 已按任务/线程隔离目录(如 task_stzip_<n>), 目录内操作又是顺序的,
+    // 因此固定文件名在批量路径下本是安全的。这里仍加唯一序号, 是为了防御:
+    //   (a) 同一目录被复用的新调用路径(如 task_prev / task_anim 是固定名, 跨会话共享)
+    //   (b) 将来若把递归改为并行, 固定名会立刻变成数据竞争
+    // 代价仅是一个 AtomicInteger 自增。
+    private static final java.util.concurrent.atomic.AtomicInteger TMP_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     // 并发转换线程数(1=单线程, 2/4=固定, -1=自动检测CPU核心数)
     private int threadCount = 1;
 
@@ -91,6 +146,10 @@ public class TexConverter extends Activity {
         autoBackup = prefs.getBoolean("autoBackup", false);
         threadCount = prefs.getInt("threadCount", 1);
         debugMode = prefs.getBoolean("debugMode", false);
+        nestedZip = prefs.getBoolean("nestedZip", true);
+        logFile = new File(getCacheDir(), "dsh_tex.log");
+        log("==== 启动 v1.4  threadCount=" + threadCount + " mode=" + convertMode
+            + " nestedZip=" + nestedZip + " backup=" + autoBackup + " ====");
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(C_BG);
@@ -330,6 +389,7 @@ public class TexConverter extends Activity {
         } catch (Exception e) {
             synchronized(results) {
                 results.add("FAIL " + input.getName() + ": " + e.getMessage());
+                logErr("转换 " + input.getName(), e);
             }
             return null;
         }
@@ -352,6 +412,7 @@ public class TexConverter extends Activity {
         } catch (Exception e) {
             synchronized(results) {
                 results.add("FAIL " + zip.getName() + ": " + e.getMessage());
+                logErr("转换 " + zip.getName(), e);
             }
             return null;
         }
@@ -394,6 +455,7 @@ public class TexConverter extends Activity {
         popup.getMenu().add("搜索文件");
         popup.getMenu().add("书签");
         popup.getMenu().add("选目录");
+        popup.getMenu().add("查看日志");
         popup.getMenu().add("关于");
         popup.setOnMenuItemClickListener(item -> {
             String t = item.getTitle().toString();
@@ -401,10 +463,45 @@ public class TexConverter extends Activity {
             else if (t.equals("搜索文件")) showSearch();
             else if (t.equals("书签")) showBookmarks();
             else if (t.equals("选目录")) pickDir();
+            else if (t.equals("查看日志")) showLog();
             else if (t.equals("关于")) showAbout();
             return true;
         });
         popup.show();
+    }
+
+    private void showLog() {
+        log("---- 打开日志查看 ----");
+        final String txt = logText();
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        TextView tv = new TextView(this);
+        tv.setText(txt);
+        tv.setTextSize(10);
+        tv.setTextIsSelectable(true);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setPadding(dp(8), dp(8), dp(8), dp(8));
+        sv.addView(tv);
+        new AlertDialog.Builder(this)
+            .setTitle("运行日志 (" + txt.split("\n").length + " 行)")
+            .setView(sv)
+            .setPositiveButton("复制", (d, w) -> {
+                android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("log", txt));
+                toast("日志已复制到剪贴板");
+            })
+            .setNeutralButton("分享", (d, w) -> {
+                try {
+                    File lf = new File(getCacheDir(), "dsh_tex.log");
+                    writeFile(lf, txt.getBytes("UTF-8"));
+                    android.content.Intent it = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                    it.setType("text/plain");
+                    it.putExtra(android.content.Intent.EXTRA_TEXT, txt);
+                    startActivity(android.content.Intent.createChooser(it, "分享日志"));
+                } catch (Throwable t2) { toast("分享失败: " + t2.getMessage()); }
+            })
+            .setNegativeButton("清空", (d, w) -> { clearLog(); toast("日志已清空"); })
+            .show();
     }
 
     private void showAbout() {
@@ -531,6 +628,13 @@ public class TexConverter extends Activity {
         cbDebug.setPadding(0, 12, 0, 0);
         panel.addView(cbDebug);
 
+        // 处理内嵌压缩包
+        final CheckBox cbNested = new CheckBox(this);
+        cbNested.setText("处理压缩包内的压缩包（内层若有 tex 也一并转换，逐层递归）");
+        cbNested.setChecked(nestedZip);
+        cbNested.setPadding(0, 12, 0, 0);
+        panel.addView(cbNested);
+
         // 并发线程数
         TextView t3 = new TextView(this);
         t3.setText("并发线程数（立即生效）");
@@ -571,6 +675,8 @@ public class TexConverter extends Activity {
                 autoBackup = cbBackup.isChecked();
                 prefs.edit().putBoolean("autoBackup", autoBackup).apply();
                 debugMode = cbDebug.isChecked();
+                nestedZip = cbNested.isChecked();
+                prefs.edit().putBoolean("nestedZip", nestedZip).apply();
                 prefs.edit().putBoolean("debugMode", debugMode).apply();
                 try {
                     int sel = rgThreads.getCheckedRadioButtonId();
@@ -1019,7 +1125,7 @@ public class TexConverter extends Activity {
     private void previewTex(final File tex) {
         toast("正在解码 " + tex.getName() + " ...");
         new Thread(() -> {
-            File tmpDir = tempWorkingDir("prev");
+            File tmpDir = tempWorkingDir("prev_" + TMP_SEQ.incrementAndGet());
             try {
                 byte[] data = readFile(tex);
                 final int comp = readTexCompression(data);
@@ -1410,7 +1516,7 @@ public class TexConverter extends Activity {
 
         private void drawDebugOverlay(android.graphics.Canvas cv) {
             float y = 26;
-            dbgText(cv, "BUILD=v25-editsync zDesc=" + (rnd.zDescending ? 1 : 0), y); y += 24;
+            dbgText(cv, "BUILD=v32-tapzip zDesc=" + (rnd.zDescending ? 1 : 0), y); y += 24;
             dbgText(cv, "atlas=" + (atlas == null ? "null" : atlas.getWidth() + "x" + atlas.getHeight()), y); y += 24;
             dbgText(cv, "anim=" + (anim == null ? "null" : anim.name)
                        + " frames=" + (anim == null ? 0 : anim.frames.length)
@@ -1507,10 +1613,13 @@ public class TexConverter extends Activity {
         }
     }
 
-    private void openAnimZip(final File zip) {
+    private void openAnimZip(final File zip) { openAnimZip(zip, false); }
+
+    /** @param editDirectly true 则解析完成后直接进入横屏编辑器, 不弹预览框 */
+    private void openAnimZip(final File zip, final boolean editDirectly) {
         toast("正在解析 " + zip.getName() + " ...");
         new Thread(() -> {
-            File tmpDir = tempWorkingDir("anim");
+            File tmpDir = tempWorkingDir("anim_" + TMP_SEQ.incrementAndGet());
             try {
                 ZipFile zf = new ZipFile(zip);
                 byte[] animD = null, buildD = null, atlasD = null;
@@ -1547,7 +1656,10 @@ public class TexConverter extends Activity {
                 }
                 final Bitmap fa = atlas;
                 final byte[] fanimD = animD;
-                runOnUiThread(() -> showAnimDialog(zip, zip.getName(), build, anim, fa, fanimD));
+                runOnUiThread(() -> {
+                    if (editDirectly) launchAnimEditor(zip, build, anim, fa, fanimD);
+                    else showAnimDialog(zip, zip.getName(), build, anim, fa, fanimD);
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> toast("动画解析失败: " + e.getMessage()));
             }
@@ -1613,45 +1725,14 @@ public class TexConverter extends Activity {
 
     // ---------- zip 浏览 ----------
     private void openZip(File zip) {
-        new Thread(() -> {
-            try {
-                ZipFile zf = new ZipFile(zip);
-                final List<String> names = new ArrayList<>();
-                java.util.Enumeration<? extends ZipEntry> en = zf.entries();
-                while (en.hasMoreElements()) {
-                    ZipEntry ze = en.nextElement();
-                    if (!ze.isDirectory()) {
-                        String nn = ze.getName().toLowerCase();
-                        if (nn.endsWith(".tex") || nn.endsWith(".png")) names.add(ze.getName());
-                    }
-                }
-                zf.close();
-                if (names.isEmpty()) { runOnUiThread(() -> toast("zip 内无 tex/png")); return; }
-                runOnUiThread(() -> new AlertDialog.Builder(this)
-                    .setTitle(zip.getName() + " 内纹理（" + names.size() + " 个）")
-                    .setItems(names.toArray(new String[0]), null)
-                    .setNeutralButton("预览动画", (d, w) -> openAnimZip(zip))
-                    .setPositiveButton("转换 zip 内全部 DXT", (d, w) -> new Thread(() -> {
-                        try {
-                            File zdir = tempWorkingDir("openzip_" + Thread.currentThread().getId());
-                            final String r;
-                            try {
-                                r = convertZipReplace(zip, zdir);
-                            } finally {
-                                File[] zs = zdir.listFiles();
-                                if (zs != null) for (File c : zs) c.delete();
-                                zdir.delete();
-                            }
-                            runOnUiThread(() -> toast(r));
-                        } catch (Exception e) {
-                            runOnUiThread(() -> toast("zip 转换失败: " + e.getMessage()));
-                        }
-                    }).start())
-                    .setNegativeButton("取消", null).show());
-            } catch (Exception e) {
-                runOnUiThread(() -> toast("zip 读取失败: " + e.getMessage()));
-            }
-        }).start();
+        // 点按 zip: 不再列出内部所有纹理文件, 只提供动画的两个入口
+        new AlertDialog.Builder(this)
+            .setTitle(zip.getName())
+            .setMessage("选择操作")
+            .setPositiveButton("预览动画", (d, w) -> openAnimZip(zip, false))
+            .setNeutralButton("编辑动画", (d, w) -> openAnimZip(zip, true))
+            .setNegativeButton("取消", null)
+            .show();
     }
 
     // ---------- 批量转换 ----------
@@ -1700,6 +1781,7 @@ public class TexConverter extends Activity {
                         }
                     } catch (Exception e) {
                         fail++; results.add("FAIL " + f.getName() + ": " + e.getMessage());
+                        logErr("递归转换 " + f.getName(), e);
                     }
                     done++;
                     final int prog = done;
@@ -1709,7 +1791,8 @@ public class TexConverter extends Activity {
                 for (File z : zipFiles) {
                     File zdir = tempWorkingDir("stzip_" + done);
                     try { String r = convertZipReplace(z, zdir); ok++; results.add("OK  " + z.getName() + " -> " + r); }
-                    catch (Exception e) { fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage()); }
+                    catch (Exception e) { fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage());
+                        logErr("批量转换 " + z.getName(), e); }
                     finally {
                         File[] zfs = zdir.listFiles();
                         if (zfs != null) for (File c : zfs) c.delete();
@@ -1793,6 +1876,7 @@ public class TexConverter extends Activity {
 
     private String convertFile(File f, File outputDir, File tmpDir) throws Exception {
         String n = f.getName().toLowerCase();
+        log("convertFile " + f.getName() + " (" + f.length() + "B) mode=" + convertMode);
         if (n.endsWith(".png")) {
             if (convertMode.equals("tex2png")) throw new Exception("当前模式为 TEX→PNG，跳过 PNG");
             return pngToTex(f, outputDir, tmpDir);
@@ -1855,8 +1939,11 @@ public class TexConverter extends Activity {
 
     // zip 内 .tex 批量转换（替换 zip 内条目，原 zip 备份 .bak）
     private String convertZipReplace(File zip, File tmpDir) throws Exception {
+        log("convertZip " + zip.getName() + " (" + zip.length() + "B) nested=" + nestedZip);
+        final int[] skip = new int[2];      // [0]=已是ASTC, [1]=模式不符
         int ok = 0;
-        File tmp = new File(tmpDir, "new.zip");
+        // 文件名唯一: 多线程批量转换时同一 tmpDir 下不能撞名
+        File tmp = new File(tmpDir, "new_" + TMP_SEQ.incrementAndGet() + ".zip");
         ZipFile zf = new ZipFile(zip);
         ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(tmp));
         java.util.Enumeration<? extends ZipEntry> en = zf.entries();
@@ -1868,14 +1955,22 @@ public class TexConverter extends Activity {
             zos.putNextEntry(ne);
             if (!ze.isDirectory() && n.endsWith(".tex")) {
                 byte[] data = readAll(zf.getInputStream(ze));
-                int comp = readTexCompression(data);
-                if (comp != 24) {
-                    data = convertTexBytes(data, tmpDir);
-                    ok++;
+                try {
+                    byte[] out2 = convertTexByMode(data, tmpDir, ze.getName(), skip);
+                    if (out2 != data) ok++;
+                    data = out2;
+                } catch (Exception ex) {
+                    log("    跳过 " + ze.getName() + ": " + ex.getMessage());
                 }
                 zos.write(data);
+            } else if (!ze.isDirectory() && n.endsWith(".zip") && nestedZip) {
+                // 内嵌压缩包: 递归处理其中(及其内层)的 tex
+                byte[] inner = readAll(zf.getInputStream(ze));
+                Object[] r = convertZipBytes(inner, tmpDir, skip);
+                zos.write((byte[]) r[0]);
+                ok += (Integer) r[1];
             } else {
-                // 非 .tex 条目流式拷贝, 避免整包读入内存导致大 zip OOM
+                // 其余条目流式拷贝, 避免整包读入内存导致大 zip OOM
                 InputStream in = zf.getInputStream(ze);
                 byte[] buf = new byte[65536];
                 int r;
@@ -1886,20 +1981,147 @@ public class TexConverter extends Activity {
         }
         zos.close();
         zf.close();
+        if (ok == 0) log("!! 顶层 zip 未发现任何可转换的 .tex —— 请对照上方内嵌 zip 的类型分布确认");
         if (autoBackup) {
             File bak = new File(zip.getAbsolutePath() + ".bak");
             if (!bak.exists()) copyFile(zip, bak);
         }
         copyFile(tmp, zip);
         tmp.delete();
-        return "zip 内 " + ok + " 个 tex 已转换";
+        String tail = "";
+        if (skip[0] > 0) tail += ", " + skip[0] + " 个已是 ASTC 跳过";
+        if (skip[1] > 0) tail += ", " + skip[1] + " 个模式不符跳过";
+        log("convertZip 完成 " + zip.getName() + " -> 转换 " + ok + tail);
+        return "zip 内 " + ok + " 个 tex 已转换" + tail;
+    }
+
+    /**
+     * 递归处理 zip 字节流: 转换其中以及内嵌 zip(可多层)中的全部非 ASTC tex。
+     * @return {处理后的 zip 字节, 累计转换个数}
+     */
+    private static final int MAX_ZIP_DEPTH = 8;
+
+    private Object[] convertZipBytes(byte[] zipData, File tmpDir, int[] skip) throws Exception {
+        return convertZipBytes(zipData, tmpDir, 0, skip);
+    }
+
+    private Object[] convertZipBytes(byte[] zipData, File tmpDir, int depth, int[] skip) throws Exception {
+        if (depth > MAX_ZIP_DEPTH) return new Object[]{zipData, 0};   // 超深则原样返回
+        final int seq = TMP_SEQ.incrementAndGet();
+        log("  内嵌 zip depth=" + depth + " " + zipData.length + "B");
+        java.util.HashMap<String,Integer> extCnt = new java.util.HashMap<>();
+        int entryTotal = 0, nameSample = 0;
+        StringBuilder nameBuf = new StringBuilder();
+        File in = new File(tmpDir, "inner_" + seq + "_in.zip");
+        File out = new File(tmpDir, "inner_" + seq + "_out.zip");
+        writeFile(in, zipData);
+        int ok = 0;
+        ZipFile zf = new ZipFile(in);
+        ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(out));
+        java.util.Enumeration<? extends ZipEntry> en = zf.entries();
+        while (en.hasMoreElements()) {
+            ZipEntry ze = en.nextElement();
+            String n = ze.getName().toLowerCase();
+            ZipEntry ne = new ZipEntry(ze.getName());
+            if (ze.getTime() > 0) ne.setTime(ze.getTime());
+            zos.putNextEntry(ne);
+            // 统计: 记录条目类型分布, 便于判断"为什么没找到 tex"
+            if (!ze.isDirectory()) {
+                entryTotal++;
+                int dot = n.lastIndexOf('.');
+                String ext = dot >= 0 ? n.substring(dot) : "(无扩展名)";
+                Integer c = extCnt.get(ext);
+                extCnt.put(ext, c == null ? 1 : c + 1);
+                if (nameSample < 3) { nameBuf.append('\n').append("      ").append(ze.getName()); nameSample++; }
+            }
+            if (!ze.isDirectory() && n.endsWith(".tex")) {
+                byte[] data = readAll(zf.getInputStream(ze));
+                try {
+                    byte[] out2 = convertTexByMode(data, tmpDir, ze.getName(), skip);
+                    if (out2 != data) ok++;
+                    data = out2;
+                } catch (Exception ex) {
+                    log("    跳过 " + ze.getName() + ": " + ex.getMessage());
+                }
+                zos.write(data);
+            } else if (!ze.isDirectory() && n.endsWith(".zip")) {
+                byte[] inner = readAll(zf.getInputStream(ze));
+                Object[] r = convertZipBytes(inner, tmpDir, depth + 1, skip);
+                zos.write((byte[]) r[0]);
+                ok += (Integer) r[1];
+            } else {
+                InputStream ins = zf.getInputStream(ze);
+                byte[] buf = new byte[65536];
+                int r;
+                while ((r = ins.read(buf)) > 0) zos.write(buf, 0, r);
+                ins.close();
+            }
+            zos.closeEntry();
+        }
+        zos.close();
+        zf.close();
+        // 输出条目类型分布(仅顶层 depth, 避免日志爆量)
+        if (entryTotal > 0 && depth == 0) {
+            log("    条目 " + entryTotal + " 个, 类型: " + extCnt);
+            log("    名称样例:" + nameBuf);
+        } else if (entryTotal == 0) {
+            log("    !! 该 zip 内没有文件条目");
+        }
+        FileInputStream fis = new FileInputStream(out);
+        byte[] res = readAll(fis);
+        in.delete(); out.delete();
+        return new Object[]{res, ok};
+    }
+
+    /**
+     * 按当前转换模式处理一份 tex 字节(顶层与内嵌压缩包共用, 保证行为一致)。
+     * 之前内嵌分支漏了模式判断, 导致所选模式对嵌套层失效。
+     * @return 处理后的字节; 若按当前模式无需处理则原样返回
+     */
+    private byte[] convertTexByMode(byte[] data, File tmpDir, String name, int[] skip) throws Exception {
+        int comp = readTexCompression(data);
+        log("    tex " + name + " comp=" + comp + " mode=" + convertMode);
+        if (convertMode.equals("png2tex")) {
+            skip[1]++;
+            log("    跳过(模式不符) " + name);
+            return data;
+        }
+        if (convertMode.equals("dxt2astc") && comp == 24) {
+            skip[0]++;
+            log("    跳过(已是 ASTC) " + name);
+            return data;
+        }
+        if (convertMode.equals("tex2png")) {
+            File t = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".tex");
+            writeFile(t, data);
+            File p = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".png");
+            runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
+            byte[] png = readAll(new FileInputStream(p));
+            t.delete(); p.delete();
+            return png;
+        }
+        if (convertMode.equals("dxt2astc")) {
+            return convertTexBytes(data, tmpDir);
+        }
+        // auto: ASTC -> PNG, 其余 -> ASTC
+        if (comp == 24) {
+            File t = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".tex");
+            writeFile(t, data);
+            File p = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".png");
+            runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
+            byte[] png = readAll(new FileInputStream(p));
+            t.delete(); p.delete();
+            return png;
+        }
+        return convertTexBytes(data, tmpDir);
     }
 
     // 内存中把 DXT/RGBA tex 字节转成 ASTC tex 字节
     private byte[] convertTexBytes(byte[] texData, File tmpDir) throws Exception {
-        File tmpTex = new File(tmpDir, "tmp.tex");
+        final int seq = TMP_SEQ.incrementAndGet();
+        File tmpTex = new File(tmpDir, "tmp_" + seq + ".tex");
         writeFile(tmpTex, texData);
-        File png = new File(tmpDir, "tmp.png");
+        File png = new File(tmpDir, "tmp_" + seq + ".png");
         runTex2png(tmpTex.getAbsolutePath(), png.getAbsolutePath());
         int[] wh = readPngSize(png);
         return buildAstcKtex(png, tmpDir);
