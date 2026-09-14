@@ -310,7 +310,7 @@ public class TexConverter extends Activity {
 
     // 并发批量转换任务(每个任务使用独立临时目录避免冲突)
     private String runConvertTaskMT(final File input, final File outputDir,
-            final java.util.List<String> results, final boolean[] hasFail) {
+            final java.util.List<String> results) {
         final String tid = String.valueOf(Thread.currentThread().getId());
         try {
             File dir = tempWorkingDir(tid);
@@ -319,13 +319,35 @@ public class TexConverter extends Activity {
                 synchronized(results) { results.add("OK  " + input.getName() + " -> " + r); }
                 return r;
             } finally {
-                for (File c : dir.listFiles()) if (c != null) c.delete();
+                File[] tfs = dir.listFiles();
+                if (tfs != null) for (File c : tfs) c.delete();
                 dir.delete();
             }
         } catch (Exception e) {
-            hasFail[0] = true;
             synchronized(results) {
                 results.add("FAIL " + input.getName() + ": " + e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    // 并发 zip 转换任务(独立临时目录, 避免并行互相覆盖)
+    private String runZipTaskMT(final File zip, final java.util.List<String> results) {
+        final String tid = String.valueOf(Thread.currentThread().getId());
+        try {
+            File dir = tempWorkingDir("zip_" + tid);
+            try {
+                String r = convertZipReplace(zip, dir);
+                synchronized(results) { results.add("OK  " + zip.getName() + " -> " + r); }
+                return r;
+            } finally {
+                File[] zs = dir.listFiles();
+                if (zs != null) for (File c : zs) c.delete();
+                dir.delete();
+            }
+        } catch (Exception e) {
+            synchronized(results) {
+                results.add("FAIL " + zip.getName() + ": " + e.getMessage());
             }
             return null;
         }
@@ -500,7 +522,7 @@ public class TexConverter extends Activity {
 
         // 并发线程数
         TextView t3 = new TextView(this);
-        t3.setText("并发线程数（需重启生效）");
+        t3.setText("并发线程数（立即生效）");
         t3.setTextSize(14);
         t3.setPadding(0, 12, 0, 0);
         panel.addView(t3);
@@ -523,9 +545,11 @@ public class TexConverter extends Activity {
         }
         panel.addView(rgThreads);
 
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.addView(panel);
         new AlertDialog.Builder(this)
             .setTitle("转换模式设置")
-            .setView(panel)
+            .setView(sv)
             .setPositiveButton("确定", (d, w) -> {
                 int m = rgMode.getCheckedRadioButtonId();
                 int s = rgSize.getCheckedRadioButtonId();
@@ -903,7 +927,15 @@ public class TexConverter extends Activity {
                     .setItems(names.toArray(new String[0]), null)
                     .setPositiveButton("转换 zip 内全部 DXT", (d, w) -> new Thread(() -> {
                         try {
-                            String r = convertZipReplace(zip);
+                            File zdir = tempWorkingDir("openzip_" + Thread.currentThread().getId());
+                            final String r;
+                            try {
+                                r = convertZipReplace(zip, zdir);
+                            } finally {
+                                File[] zs = zdir.listFiles();
+                                if (zs != null) for (File c : zs) c.delete();
+                                zdir.delete();
+                            }
                             runOnUiThread(() -> toast(r));
                         } catch (Exception e) {
                             runOnUiThread(() -> toast("zip 转换失败: " + e.getMessage()));
@@ -945,7 +977,6 @@ public class TexConverter extends Activity {
 
         new Thread(() -> {
             final java.util.List<String> results = new java.util.ArrayList<>();
-            final boolean[] hasFail = {false};
             int ok = 0, fail = 0;
 
             if (N <= 1) {
@@ -970,8 +1001,14 @@ public class TexConverter extends Activity {
                     runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
                 }
                 for (File z : zipFiles) {
-                    try { String r = convertZipReplace(z); ok++; results.add("OK  " + z.getName() + " -> " + r); }
+                    File zdir = tempWorkingDir("stzip_" + done);
+                    try { String r = convertZipReplace(z, zdir); ok++; results.add("OK  " + z.getName() + " -> " + r); }
                     catch (Exception e) { fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage()); }
+                    finally {
+                        File[] zfs = zdir.listFiles();
+                        if (zfs != null) for (File c : zfs) c.delete();
+                        zdir.delete();
+                    }
                     done++;
                     final int prog = done;
                     final String st = "转换中 " + done + "/" + total + "  成功 " + ok + "  失败 " + fail;
@@ -988,7 +1025,7 @@ public class TexConverter extends Activity {
 
                 for (final File f : texFiles) {
                     futures.add(executor.submit(() -> {
-                        String r = runConvertTaskMT(f, f.getParentFile(), results, hasFail);
+                        String r = runConvertTaskMT(f, f.getParentFile(), results);
                         synchronized(done) {
                             done[0]++;
                             final int prog = done[0];
@@ -1001,21 +1038,13 @@ public class TexConverter extends Activity {
                 for (final File z : zipFiles) {
                     futures.add(executor.submit(() -> {
                         try {
-                            String r = convertZipReplace(z);
-                            synchronized(results) {
-                                results.add("OK  " + z.getName() + " -> " + r);
-                            }
-                            return r;
-                        } catch (Exception e) {
-                            hasFail[0] = true;
-                            synchronized(results) {
-                                results.add("FAIL " + z.getName() + ": " + e.getMessage());
-                            }
-                            return null;
+                            return runZipTaskMT(z, results);
                         } finally {
-                            synchronized(done) { done[0]++; }
-                            final int prog = done[0];
-                            runOnUiThread(() -> pd.setProgress(prog));
+                            synchronized(done) {
+                                done[0]++;
+                                final int prog = done[0];
+                                runOnUiThread(() -> pd.setProgress(prog));
+                            }
                         }
                     }));
                 }
@@ -1106,7 +1135,7 @@ public class TexConverter extends Activity {
             if (!bak.exists()) copyFile(tex, bak);
         }
         writeFile(tex, ktex);
-        return autoBackup ? "已替换，原文件" +2192+ bak.getName() : "已替换（未备份）";
+        return autoBackup ? "已替换，原文件→" + bak.getName() : "已替换（未备份）";
     }
 
     private String texToPng(File tex, File outputDir, File tmpDir) throws Exception {
@@ -1125,9 +1154,9 @@ public class TexConverter extends Activity {
     }
 
     // zip 内 .tex 批量转换（替换 zip 内条目，原 zip 备份 .bak）
-    private String convertZipReplace(File zip) throws Exception {
+    private String convertZipReplace(File zip, File tmpDir) throws Exception {
         int ok = 0;
-        File tmp = new File(getCacheDir(), "new.zip");
+        File tmp = new File(tmpDir, "new.zip");
         ZipFile zf = new ZipFile(zip);
         ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(tmp));
         java.util.Enumeration<? extends ZipEntry> en = zf.entries();
@@ -1141,7 +1170,7 @@ public class TexConverter extends Activity {
                 byte[] data = readAll(zf.getInputStream(ze));
                 int comp = readTexCompression(data);
                 if (comp != 24) {
-                    data = convertTexBytes(data);
+                    data = convertTexBytes(data, tmpDir);
                     ok++;
                 }
                 zos.write(data);
@@ -1167,13 +1196,13 @@ public class TexConverter extends Activity {
     }
 
     // 内存中把 DXT/RGBA tex 字节转成 ASTC tex 字节
-    private byte[] convertTexBytes(byte[] texData) throws Exception {
-        File tmpTex = new File(getCacheDir(), "tmp.tex");
+    private byte[] convertTexBytes(byte[] texData, File tmpDir) throws Exception {
+        File tmpTex = new File(tmpDir, "tmp.tex");
         writeFile(tmpTex, texData);
-        File png = new File(getCacheDir(), "tmp.png");
+        File png = new File(tmpDir, "tmp.png");
         runTex2png(tmpTex.getAbsolutePath(), png.getAbsolutePath());
         int[] wh = readPngSize(png);
-        File astc = new File(getCacheDir(), "tmp.astc");
+        File astc = new File(tmpDir, "tmp.astc");
         runAstcenc("-cl", png.getAbsolutePath(), astc.getAbsolutePath(), blockSize, "-" + quality);
         byte[] raw = stripAstcHeader(readFile(astc));
         return packKtex(wh[0], wh[1], raw);
