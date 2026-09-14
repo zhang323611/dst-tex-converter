@@ -76,8 +76,8 @@ echo "=== 编译 libtex2png.so ==="
 
 # ---------- 编译 Java ----------
 echo "=== 编译 Java ==="
-cp "$ROOT/app/src/com/dsttex/TexConverter.java" "$WORK/src/com/dsttex/"
-javac -source 8 -target 8 -classpath "$JAR" -d "$WORK/classes" "$WORK/src/com/dsttex/TexConverter.java"
+cp "$ROOT/app/src/com/dsttex/"*.java "$WORK/src/com/dsttex/"
+javac -source 8 -target 8 -classpath "$JAR" -d "$WORK/classes" "$WORK/src/com/dsttex/"*.java
 
 # ---------- d8 转 dex ----------
 echo "=== d8 转 dex ==="
