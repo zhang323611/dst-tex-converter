@@ -78,12 +78,15 @@ public class TexConverter extends Activity {
     private LinearLayout drawerPanel;
     // 目录子项数缓存(browse 时一次性统计, 避免 getView 每帧 listFiles)
     private final java.util.HashMap<String, Integer> dirCount = new java.util.HashMap<>();
+    // 并发转换线程数(1=单线程, 2/4=固定, -1=自动检测CPU核心数)
+    private int threadCount = 1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("texconv", MODE_PRIVATE);
         autoBackup = prefs.getBoolean("autoBackup", false);
+        threadCount = prefs.getInt("threadCount", 1);
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(C_BG);
@@ -293,6 +296,41 @@ public class TexConverter extends Activity {
         drawerLayer.setVisibility(View.GONE);
     }
 
+    // ---------- 并发转换辅助 ----------
+    private File tempWorkingDir(String suffix) {
+        File dir = new File(getCacheDir(), "task_" + suffix);
+        dir.mkdirs();
+        return dir;
+    }
+
+    private int activeThreadCount() {
+        if (threadCount < 0) return Math.max(1, Runtime.getRuntime().availableProcessors());
+        return Math.max(1, threadCount);
+    }
+
+    // 并发批量转换任务(每个任务使用独立临时目录避免冲突)
+    private String runConvertTaskMT(final File input, final File outputDir,
+            final java.util.List<String> results, final boolean[] hasFail) {
+        final String tid = String.valueOf(Thread.currentThread().getId());
+        try {
+            File dir = tempWorkingDir(tid);
+            try {
+                String r = convertFile(input, outputDir, dir);
+                synchronized(results) { results.add("OK  " + input.getName() + " -> " + r); }
+                return r;
+            } finally {
+                for (File c : dir.listFiles()) if (c != null) c.delete();
+                dir.delete();
+            }
+        } catch (Exception e) {
+            hasFail[0] = true;
+            synchronized(results) {
+                results.add("FAIL " + input.getName() + ": " + e.getMessage());
+            }
+            return null;
+        }
+    }
+
     private void updateBreadcrumb() {
         if (crumbBar == null) return;
         crumbBar.removeAllViews();
@@ -460,6 +498,31 @@ public class TexConverter extends Activity {
         cbBackup.setPadding(0, 12, 0, 0);
         panel.addView(cbBackup);
 
+        // 并发线程数
+        TextView t3 = new TextView(this);
+        t3.setText("并发线程数（需重启生效）");
+        t3.setTextSize(14);
+        t3.setPadding(0, 12, 0, 0);
+        panel.addView(t3);
+        final int cpuCores = Math.max(1, Runtime.getRuntime().availableProcessors());
+        final String[] threadVals = {"1", "2", "4", "8", "-1"};
+        final String[] threadLabels = {
+            "1 — 单线程（默认，兼容）",
+            "2 — 双线程",
+            "4 — 四线程",
+            "8 — 八线程",
+            "自动 — 检测 " + cpuCores + " 核"
+        };
+        final android.widget.RadioGroup rgThreads = new android.widget.RadioGroup(this);
+        for (int i = 0; i < threadVals.length; i++) {
+            android.widget.RadioButton rb = new android.widget.RadioButton(this);
+            rb.setText(threadLabels[i]);
+            rb.setId(i);
+            if (threadCount == Integer.parseInt(threadVals[i])) rb.setChecked(true);
+            rgThreads.addView(rb);
+        }
+        panel.addView(rgThreads);
+
         new AlertDialog.Builder(this)
             .setTitle("转换模式设置")
             .setView(panel)
@@ -472,6 +535,11 @@ public class TexConverter extends Activity {
                 if (q >= 0 && q < qualVals.length) quality = qualVals[q];
                 autoBackup = cbBackup.isChecked();
                 prefs.edit().putBoolean("autoBackup", autoBackup).apply();
+                try {
+                    int sel = rgThreads.getCheckedRadioButtonId();
+                    threadCount = Integer.parseInt(threadVals[sel]);
+                    prefs.edit().putInt("threadCount", threadCount).apply();
+                } catch (Exception ignored) {}
                 updateStatus();
             })
             .setNegativeButton("取消", null).show();
@@ -731,7 +799,9 @@ public class TexConverter extends Activity {
     }
 
     private void updateStatus() {
-        statusView.setText("方式 " + modeLabel() + "  " + blockSize + "/" + quality + "   共 " + entries.size() + " 项   输出到源目录");
+        String tc = threadCount < 0 ? "auto" : String.valueOf(threadCount);
+        statusView.setText("方式 " + modeLabel() + "  " + blockSize + "/" + quality
+            + "   共 " + entries.size() + " 项   " + tc + " 线程   输出到源目录");
     }
 
     // ---------- 文件列表 Adapter ----------
@@ -849,9 +919,8 @@ public class TexConverter extends Activity {
     // ---------- 批量转换 ----------
     private void convertSelected() {
         if (!engineReady) { toast("引擎未就绪"); return; }
-        // 收集工作项：选中文件 + 选中文件夹内所有 tex/zip + 选中 zip
-        final List<File> texFiles = new ArrayList<>();
-        final List<File> zipFiles = new ArrayList<>();
+        final java.util.List<File> texFiles = new java.util.ArrayList<>();
+        final java.util.List<File> zipFiles = new java.util.ArrayList<>();
         for (int i = 0; i < entries.size(); i++) {
             if (!listView.isItemChecked(i)) continue;
             File f = entries.get(i);
@@ -863,9 +932,10 @@ public class TexConverter extends Activity {
         final int total = texFiles.size() + zipFiles.size();
         exitMultiSelect();
 
-        // 进度对话框（任务中不可取消）
+        final int N = activeThreadCount();
+
         final ProgressDialog pd = new ProgressDialog(this);
-        pd.setTitle("转换中");
+        pd.setTitle(N > 1 ? "转换中 (" + N + " 线程)" : "转换中");
         pd.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
         pd.setMax(total);
         pd.setCancelable(false);
@@ -874,43 +944,101 @@ public class TexConverter extends Activity {
         pd.show();
 
         new Thread(() -> {
-            int ok = 0, fail = 0, done = 0;
-            StringBuilder sb = new StringBuilder();
-            for (File f : texFiles) {
-                try {
-                    String r = convertFile(f);
-                    ok++;
-                    sb.append("OK  ").append(f.getName()).append(" -> ").append(r).append("\n");
-                } catch (Exception e) {
-                    fail++;
-                    sb.append("FAIL ").append(f.getName()).append(": ").append(e.getMessage()).append("\n");
+            final java.util.List<String> results = new java.util.ArrayList<>();
+            final boolean[] hasFail = {false};
+            int ok = 0, fail = 0;
+
+            if (N <= 1) {
+                // ---------- 单线程路径(兼容旧行为) ----------
+                int done = 0;
+                for (File f : texFiles) {
+                    try {
+                        File tmpDir = tempWorkingDir("st_" + done);
+                        try {
+                            String r = convertFile(f, f.getParentFile(), tmpDir);
+                            ok++; results.add("OK  " + f.getName() + " -> " + r);
+                        } finally {
+                            for (File c : tmpDir.listFiles()) if (c != null) c.delete();
+                            tmpDir.delete();
+                        }
+                    } catch (Exception e) {
+                        fail++; results.add("FAIL " + f.getName() + ": " + e.getMessage());
+                    }
+                    done++;
+                    final int prog = done;
+                    final String st = "转换中 " + done + "/" + total + "  成功 " + ok + "  失败 " + fail;
+                    runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
                 }
-                done++;
-                final int prog = done;
-                final String st = "转换中 " + done + "/" + total + "  成功 " + ok + "  失败 " + fail;
-                runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
-            }
-            for (File z : zipFiles) {
-                try {
-                    String r = convertZipReplace(z);
-                    ok++;
-                    sb.append("OK  ").append(z.getName()).append(" -> ").append(r).append("\n");
-                } catch (Exception e) {
-                    fail++;
-                    sb.append("FAIL ").append(z.getName()).append(": ").append(e.getMessage()).append("\n");
+                for (File z : zipFiles) {
+                    try { String r = convertZipReplace(z); ok++; results.add("OK  " + z.getName() + " -> " + r); }
+                    catch (Exception e) { fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage()); }
+                    done++;
+                    final int prog = done;
+                    final String st = "转换中 " + done + "/" + total + "  成功 " + ok + "  失败 " + fail;
+                    runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
                 }
-                done++;
-                final int prog = done;
-                final String st = "转换中 " + done + "/" + total + "  成功 " + ok + "  失败 " + fail;
-                runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
+            } else {
+                // ---------- 多线程路径 ----------
+                java.util.concurrent.ExecutorService executor =
+                    java.util.concurrent.Executors.newFixedThreadPool(N);
+
+                final int done[] = {0};
+                java.util.List<java.util.concurrent.Future<String>> futures =
+                    new java.util.ArrayList<>();
+
+                for (final File f : texFiles) {
+                    futures.add(executor.submit(() -> {
+                        String r = runConvertTaskMT(f, f.getParentFile(), results, hasFail);
+                        synchronized(done) {
+                            done[0]++;
+                            final int prog = done[0];
+                            final String st = "转换中 " + done[0] + "/" + total + "  线程 " + N;
+                            runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
+                        }
+                        return r;
+                    }));
+                }
+                for (final File z : zipFiles) {
+                    futures.add(executor.submit(() -> {
+                        try {
+                            String r = convertZipReplace(z);
+                            synchronized(results) {
+                                results.add("OK  " + z.getName() + " -> " + r);
+                            }
+                            return r;
+                        } catch (Exception e) {
+                            hasFail[0] = true;
+                            synchronized(results) {
+                                results.add("FAIL " + z.getName() + ": " + e.getMessage());
+                            }
+                            return null;
+                        } finally {
+                            synchronized(done) { done[0]++; }
+                            final int prog = done[0];
+                            runOnUiThread(() -> pd.setProgress(prog));
+                        }
+                    }));
+                }
+
+                executor.shutdown();
+                try { executor.awaitTermination(30, java.util.concurrent.TimeUnit.MINUTES); }
+                catch (InterruptedException ignored) {}
+
+                for (java.util.concurrent.Future<String> f : futures) {
+                    try { if (f.get() != null) ok++; else fail++; }
+                    catch (Exception e) { fail++; }
+                }
             }
-            final String result = sb.toString();
+
+            final String result = String.join("\n", results);
             final int fok = ok, ffail = fail;
             runOnUiThread(() -> {
                 pd.dismiss();
                 new AlertDialog.Builder(this)
                     .setTitle("转换完成")
-                    .setMessage("成功 " + fok + "，失败 " + ffail + "\n（已替换原文件，备份 .bak）\n\n" + result)
+                    .setMessage("成功 " + fok + "，失败 " + ffail
+                        + (N > 1 ? " (" + N + " 线程)" : "")
+                        + "\n（已替换原文件，备份 .bak）\n\n" + result)
                     .setPositiveButton("确定", null)
                     .show();
             });
@@ -928,69 +1056,70 @@ public class TexConverter extends Activity {
         }
     }
 
-    private String convertFile(File f) throws Exception {
+    private String convertFile(File f, File outputDir, File tmpDir) throws Exception {
         String n = f.getName().toLowerCase();
         if (n.endsWith(".png")) {
             if (convertMode.equals("tex2png")) throw new Exception("当前模式为 TEX→PNG，跳过 PNG");
-            return pngToTex(f);
+            return pngToTex(f, outputDir, tmpDir);
         } else if (n.endsWith(".tex")) {
             int comp = readTexCompression(f);
             if (convertMode.equals("png2tex")) throw new Exception("当前模式为 PNG→TEX，跳过 TEX");
-            if (convertMode.equals("tex2png")) return texToPng(f);
+            if (convertMode.equals("tex2png")) return texToPng(f, outputDir, tmpDir);
             if (convertMode.equals("dxt2astc")) {
                 if (comp == 24) throw new Exception("已是 ASTC，跳过");
-                return texToAstc(f);
+                return texToAstc(f, outputDir, tmpDir);
             }
             // auto
-            if (comp == 24) return texToPng(f);
-            else return texToAstc(f);
+            if (comp == 24) {
+                return texToPng(f, outputDir, tmpDir);
+            } else {
+                return texToAstc(f, outputDir, tmpDir);
+            }
         }
         throw new Exception("不支持的文件类型");
     }
 
-    // ---------- 转换实现 ----------
-    private String pngToTex(File png) throws Exception {
+    private String pngToTex(File png, File outputDir, File tmpDir) throws Exception {
         int[] wh = readPngSize(png);
-        File flip = new File(getCacheDir(), "flip.png");
+        File flip = new File(tmpDir, "flip.png");
         flipPng(png, flip);
-        File astc = new File(getCacheDir(), "out.astc");
+        File astc = new File(tmpDir, "out.astc");
         runAstcenc("-cl", flip.getAbsolutePath(), astc.getAbsolutePath(), blockSize, "-" + quality);
         byte[] raw = stripAstcHeader(readFile(astc));
         byte[] ktex = packKtex(wh[0], wh[1], raw);
-        File out = new File(png.getParentFile(), baseName(png) + ".tex");
+        File out = new File(outputDir, baseName(png) + ".tex");
         writeFile(out, ktex);
         return out.getName();
     }
 
-    private String texToAstc(File tex) throws Exception {
-        File flipPng = new File(getCacheDir(), "decoded.png");
+    private String texToAstc(File tex, File outputDir, File tmpDir) throws Exception {
+        File flipPng = new File(tmpDir, "decoded.png");
         runTex2png(tex.getAbsolutePath(), flipPng.getAbsolutePath());
         int[] wh = readPngSize(flipPng);
-        File astc = new File(getCacheDir(), "out.astc");
+        File astc = new File(tmpDir, "out.astc");
         runAstcenc("-cl", flipPng.getAbsolutePath(), astc.getAbsolutePath(), blockSize, "-" + quality);
         byte[] raw = stripAstcHeader(readFile(astc));
         byte[] ktex = packKtex(wh[0], wh[1], raw);
-        // 按设置决定是否备份原文件为 .bak（仅首次），然后替换原文件
         File bak = null;
         if (autoBackup) {
             bak = new File(tex.getAbsolutePath() + ".bak");
             if (!bak.exists()) copyFile(tex, bak);
         }
         writeFile(tex, ktex);
-        return autoBackup ? "已替换，原文件→" + bak.getName() : "已替换（未备份）";
+        return autoBackup ? "已替换，原文件" +2192+ bak.getName() : "已替换（未备份）";
     }
 
-    private String texToPng(File tex) throws Exception {
+    private String texToPng(File tex, File outputDir, File tmpDir) throws Exception {
         byte[] ktex = readFile(tex);
         KtexInfo info = unpackKtex(ktex);
-        File astc = new File(getCacheDir(), "in.astc");
+        File astc = new File(tmpDir, "in.astc");
         byte[] astcFull = new byte[info.raw.length + 16];
         writeAstcHeader(astcFull, info.w, info.h);
         System.arraycopy(info.raw, 0, astcFull, 16, info.raw.length);
         writeFile(astc, astcFull);
-        File flipPng = new File(getCacheDir(), "decoded.png");
+        File flipPng = new File(tmpDir, "decoded.png");
         runAstcenc("-dl", astc.getAbsolutePath(), flipPng.getAbsolutePath());
-        File out = new File(tex.getParentFile(), baseName(tex) + ".png");
+        File out = new File(outputDir, baseName(tex) + ".png");
         flipPng(flipPng, out);
         return out.getName();
     }
