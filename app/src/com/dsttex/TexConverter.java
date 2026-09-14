@@ -812,6 +812,10 @@ public class TexConverter extends Activity {
             browse(f);
         } else if (f.getName().toLowerCase().endsWith(".zip")) {
             openZip(f);
+        } else if (f.getName().toLowerCase().endsWith(".dyn")) {
+            openDyn(f);
+        } else if (f.getName().toLowerCase().endsWith(".tex")) {
+            previewTex(f);
         } else {
             toast("长按进入多选后转换。文件: " + f.getName());
         }
@@ -904,6 +908,171 @@ public class TexConverter extends Activity {
         if (b < 1024) return b + " B";
         if (b < 1048576) return String.format("%.1f KB", b / 1024.0);
         return String.format("%.1f MB", b / 1048576.0);
+    }
+
+    // ================= .dyn 解密 / 加密 =================
+    // 8 字节分块: 置换 + XOR。解密后为 zip; 以 "PK" 开头则原样直通
+    private static final int[] DYN_IDX = {5, 3, 6, 7, 4, 2, 0, 1};
+
+    private static boolean isPk(byte[] b) {
+        return b.length >= 2 && b[0] == 'P' && b[1] == 'K';
+    }
+
+    // out[i] = in[idx[i]] ^ (0x8D + i)
+    private byte[] dynDecrypt(byte[] in) {
+        if (isPk(in)) return in;
+        byte[] out = new byte[in.length];
+        int full = in.length / 8;
+        for (int b = 0; b < full; b++) {
+            int base = b * 8;
+            for (int i = 0; i < 8; i++) {
+                out[base + i] = (byte) ((in[base + DYN_IDX[i]] & 0xFF) ^ (0x8D + i));
+            }
+        }
+        for (int k = full * 8; k < in.length; k++) out[k] = in[k];
+        return out;
+    }
+
+    // out[idx[i]] = in[i] ^ (0x8D + i)
+    private byte[] dynEncrypt(byte[] in) {
+        if (isPk(in)) return in;
+        byte[] out = new byte[in.length];
+        int full = in.length / 8;
+        for (int b = 0; b < full; b++) {
+            int base = b * 8;
+            for (int i = 0; i < 8; i++) {
+                out[base + DYN_IDX[i]] = (byte) ((in[base + i] & 0xFF) ^ (0x8D + i));
+            }
+        }
+        for (int k = full * 8; k < in.length; k++) out[k] = in[k];
+        return out;
+    }
+
+    // 打开 .dyn: 解密为 zip, 列出包内条目
+    private void openDyn(final File dyn) {
+        toast("正在解密 " + dyn.getName() + " ...");
+        new Thread(() -> {
+            try {
+                byte[] raw = readFile(dyn);
+                final byte[] dec = dynDecrypt(raw);
+                if (!isPk(dec)) {
+                    runOnUiThread(() -> toast("解密结果不是 zip(可能格式不符)"));
+                    return;
+                }
+                File zip = new File(getCacheDir(), baseName(dyn) + ".zip");
+                writeFile(zip, dec);
+                final java.util.List<String> items = new ArrayList<>();
+                long total = 0;
+                ZipFile zf = new ZipFile(zip);
+                java.util.Enumeration<? extends ZipEntry> en = zf.entries();
+                while (en.hasMoreElements()) {
+                    ZipEntry ze = en.nextElement();
+                    if (ze.isDirectory()) continue;
+                    items.add(ze.getName() + "    " + humanSize(ze.getSize()));
+                    total += ze.getSize();
+                }
+                zf.close();
+                final long tot = total;
+                runOnUiThread(() -> {
+                    if (items.isEmpty()) { toast("zip 内无文件"); return; }
+                    new AlertDialog.Builder(this)
+                        .setTitle(dyn.getName() + "  解密后 " + items.size() + " 项 / " + humanSize(tot))
+                        .setItems(items.toArray(new String[0]), null)
+                        .setPositiveButton("导出 zip", (d, w) -> {
+                            try {
+                                File outZip = new File(dyn.getParentFile(), baseName(dyn) + ".zip");
+                                copyFile(zip, outZip);
+                                toast("已导出: " + outZip.getName());
+                            } catch (Exception e) { toast("导出失败: " + e.getMessage()); }
+                        })
+                        .setNeutralButton("重新加密", (d, w) -> {
+                            try {
+                                File outDyn = new File(dyn.getParentFile(), baseName(dyn) + "_re.dyn");
+                                writeFile(outDyn, dynEncrypt(dec));
+                                toast("已写出: " + outDyn.getName());
+                            } catch (Exception e) { toast("加密失败: " + e.getMessage()); }
+                        })
+                        .setNegativeButton("关闭", null)
+                        .show();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> toast("dyn 解密失败: " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    // ================= .tex 预览 =================
+    // 支持的 comp: 0/1/2(DXT1/3/5), 4(RGBA), 5(RGB) 走 tex2png; 24(ASTC) 走 astcenc
+    private void previewTex(final File tex) {
+        toast("正在解码 " + tex.getName() + " ...");
+        new Thread(() -> {
+            File tmpDir = tempWorkingDir("prev");
+            try {
+                byte[] data = readFile(tex);
+                final int comp = readTexCompression(data);
+                File raw = new File(tmpDir, "raw.png");
+                if (comp == 24) {
+                    KtexInfo info = unpackKtex(data);
+                    File astc = new File(tmpDir, "p.astc");
+                    byte[] full = new byte[info.raw.length + 16];
+                    writeAstcHeader(full, info.w, info.h);
+                    System.arraycopy(info.raw, 0, full, 16, info.raw.length);
+                    writeFile(astc, full);
+                    runAstcenc("-dl", astc.getAbsolutePath(), raw.getAbsolutePath());
+                } else {
+                    runTex2png(tex.getAbsolutePath(), raw.getAbsolutePath());
+                }
+                // KTEX 数据为垂直翻转存储, 预览需翻正
+                File shown = new File(tmpDir, "shown.png");
+                flipPng(raw, shown);
+                final Bitmap bmp = BitmapFactory.decodeFile(shown.getAbsolutePath());
+                if (bmp == null) throw new Exception("PNG 解码失败");
+                final String info2 = compLabel(comp) + "   " + bmp.getWidth() + " x " + bmp.getHeight()
+                    + "   " + humanSize(tex.length());
+                runOnUiThread(() -> showPreviewDialog(tex.getName(), bmp, info2));
+            } catch (Exception e) {
+                runOnUiThread(() -> toast("预览失败: " + e.getMessage()));
+            } finally {
+                File[] fs = tmpDir.listFiles();
+                if (fs != null) for (File c : fs) c.delete();
+                tmpDir.delete();
+            }
+        }).start();
+    }
+
+    private String compLabel(int c) {
+        switch (c) {
+            case 0: return "DXT1";
+            case 1: return "DXT3";
+            case 2: return "DXT5";
+            case 4: return "RGBA";
+            case 5: return "RGB";
+            case 24: return "ASTC";
+            default: return "comp=" + c;
+        }
+    }
+
+    private void showPreviewDialog(String title, Bitmap bmp, String info) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(12), dp(10), dp(12), dp(10));
+        TextView t = new TextView(this);
+        t.setText(info);
+        t.setTextSize(12);
+        t.setTextColor(C_TEXT_SUB);
+        t.setPadding(0, 0, 0, dp(6));
+        col.addView(t);
+        android.widget.ImageView iv = new android.widget.ImageView(this);
+        iv.setImageBitmap(bmp);
+        iv.setAdjustViewBounds(true);
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.addView(iv);
+        col.addView(sv);
+        new AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(col)
+            .setPositiveButton("关闭", null)
+            .show();
     }
 
     // ---------- zip 浏览 ----------
@@ -1112,10 +1281,7 @@ public class TexConverter extends Activity {
         int[] wh = readPngSize(png);
         File flip = new File(tmpDir, "flip.png");
         flipPng(png, flip);
-        File astc = new File(tmpDir, "out.astc");
-        runAstcenc("-cl", flip.getAbsolutePath(), astc.getAbsolutePath(), blockSize, "-" + quality);
-        byte[] raw = stripAstcHeader(readFile(astc));
-        byte[] ktex = packKtex(wh[0], wh[1], raw);
+        byte[] ktex = buildAstcKtex(flip, tmpDir);
         File out = new File(outputDir, baseName(png) + ".tex");
         writeFile(out, ktex);
         return out.getName();
@@ -1125,10 +1291,7 @@ public class TexConverter extends Activity {
         File flipPng = new File(tmpDir, "decoded.png");
         runTex2png(tex.getAbsolutePath(), flipPng.getAbsolutePath());
         int[] wh = readPngSize(flipPng);
-        File astc = new File(tmpDir, "out.astc");
-        runAstcenc("-cl", flipPng.getAbsolutePath(), astc.getAbsolutePath(), blockSize, "-" + quality);
-        byte[] raw = stripAstcHeader(readFile(astc));
-        byte[] ktex = packKtex(wh[0], wh[1], raw);
+        byte[] ktex = buildAstcKtex(flipPng, tmpDir);
         File bak = null;
         if (autoBackup) {
             bak = new File(tex.getAbsolutePath() + ".bak");
@@ -1202,10 +1365,7 @@ public class TexConverter extends Activity {
         File png = new File(tmpDir, "tmp.png");
         runTex2png(tmpTex.getAbsolutePath(), png.getAbsolutePath());
         int[] wh = readPngSize(png);
-        File astc = new File(tmpDir, "tmp.astc");
-        runAstcenc("-cl", png.getAbsolutePath(), astc.getAbsolutePath(), blockSize, "-" + quality);
-        byte[] raw = stripAstcHeader(readFile(astc));
-        return packKtex(wh[0], wh[1], raw);
+        return buildAstcKtex(png, tmpDir);
     }
 
     // ---------- 翻转 ----------
@@ -1230,13 +1390,63 @@ public class TexConverter extends Activity {
     }
 
     // ---------- KTEX ----------
-    private byte[] packKtex(int w, int h, byte[] raw) {
-        ByteBuffer bb = ByteBuffer.allocate(8 + 10 + raw.length).order(ByteOrder.LITTLE_ENDIAN);
+    // KTEX 头部基础标志位(compression=24/ASTC 已含)。mipmap 数占 bits 13-17
+    private static final int KTEX_BASE_FLAGS = 0xFFFC0380;
+
+    // 按完整 mipmap 链打包 KTEX
+    // 每级 pre: w(2) h(2) pitch(2) datasz(4)
+    //   pitch  = ceil(w/8) * 16
+    //   datasz = ceil(w/8) * ceil(h/8) * 16
+    private byte[] packKtexLevels(java.util.List<int[]> dims, java.util.List<byte[]> datas) {
+        int n = dims.size();
+        int total = 8 + n * 10;
+        for (byte[] p : datas) total += p.length;
+        ByteBuffer bb = ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN);
         bb.put((byte) 'K').put((byte) 'T').put((byte) 'E').put((byte) 'X');
-        bb.putInt(0xfff02380);
-        bb.putShort((short) w).putShort((short) h).putShort((short) 0).putInt(raw.length);
-        bb.put(raw);
+        bb.putInt(KTEX_BASE_FLAGS | (n << 13));
+        for (int i = 0; i < n; i++) {
+            int w = dims.get(i)[0], h = dims.get(i)[1];
+            int pitch = ((w + 7) / 8) * 16;
+            bb.putShort((short) w).putShort((short) h).putShort((short) pitch)
+              .putInt(datas.get(i).length);
+        }
+        for (byte[] p : datas) bb.put(p);
         return bb.array();
+    }
+
+    // 逐级下采样 + astcenc 逐级编码, 生成完整 mipmap 链的 KTEX
+    // 注意: 若只写 1 级 mipmap, 引擎启用 mipmap 过滤时纹理不完整 -> 部分机型采样为黑色
+    private byte[] buildAstcKtex(File sourcePng, File tmpDir) throws Exception {
+        Bitmap bmp = BitmapFactory.decodeFile(sourcePng.getAbsolutePath());
+        if (bmp == null) throw new Exception("无法解码 PNG");
+        java.util.List<int[]> dims = new java.util.ArrayList<>();
+        java.util.List<byte[]> datas = new java.util.ArrayList<>();
+        Bitmap cur = bmp;
+        int w = cur.getWidth(), h = cur.getHeight();
+        try {
+            for (int level = 0; level < 20; level++) {
+                File in = new File(tmpDir, "mip" + level + ".png");
+                File out = new File(tmpDir, "mip" + level + ".astc");
+                FileOutputStream fos = new FileOutputStream(in);
+                cur.compress(Bitmap.CompressFormat.PNG, 100, fos);
+                fos.close();
+                runAstcenc("-cl", in.getAbsolutePath(), out.getAbsolutePath(), blockSize, "-" + quality);
+                dims.add(new int[]{w, h});
+                datas.add(stripAstcHeader(readFile(out)));
+                in.delete(); out.delete();
+                if (w == 1 && h == 1) break;
+                int nw = Math.max(1, w / 2), nh = Math.max(1, h / 2);
+                if (nw == w && nh == h) break;
+                Bitmap next = Bitmap.createScaledBitmap(cur, nw, nh, true);
+                if (next != cur && cur != bmp) cur.recycle();
+                cur = next;
+                w = nw; h = nh;
+            }
+        } finally {
+            if (cur != null && cur != bmp) cur.recycle();
+            if (bmp != null && !bmp.isRecycled()) bmp.recycle();
+        }
+        return packKtexLevels(dims, datas);
     }
 
     private KtexInfo unpackKtex(byte[] ktex) throws Exception {
