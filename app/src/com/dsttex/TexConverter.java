@@ -78,6 +78,64 @@ public class TexConverter extends Activity {
     private LinearLayout drawerPanel;
     // 目录子项数缓存(browse 时一次性统计, 避免 getView 每帧 listFiles)
     private final java.util.HashMap<String, Integer> dirCount = new java.util.HashMap<>();
+    // 调试模式: 控制预览画布上的诊断叠层(诊断代码全部保留, 仅按开关显示)
+    private boolean debugMode = false;
+
+    // 处理压缩包内嵌的压缩包(逐层递归)
+    private boolean nestedZip = true;
+
+    // 跳过统计通过参数传递(见 int[] skip), 不用实例字段 —— 批量转换为多线程,
+    // 实例字段会被并发调用互相覆盖, 导致提示数字与实际不符。
+
+    // ---------- 运行日志(便于排查转换失败) ----------
+    private static final int LOG_MAX = 500;
+    private static final java.util.ArrayDeque<String> LOG = new java.util.ArrayDeque<>();
+    private static File logFile;
+
+    /** 追加一行日志: 内存环形缓冲 + 落盘(cacheDir/dsh_tex.log) */
+    static synchronized void log(String msg) {
+        String line = new java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS",
+                java.util.Locale.US).format(new java.util.Date()) + "  " + msg;
+        LOG.addLast(line);
+        while (LOG.size() > LOG_MAX) LOG.removeFirst();
+        if (logFile != null) {
+            try {
+                java.io.FileWriter w = new java.io.FileWriter(logFile, true);
+                w.write(line + "\n");
+                w.close();
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 记录异常(含调用栈), 供日志查看 */
+    static void logErr(String tag, Throwable t) {
+        log("!! " + tag + ": " + t);
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        for (String ln : sw.toString().split("\n")) log("    " + ln.trim());
+    }
+
+    static synchronized String logText() {
+        StringBuilder sb = new StringBuilder();
+        for (String l : LOG) sb.append(l).append('\n');
+        return sb.toString();
+    }
+
+    static synchronized void clearLog() {
+        LOG.clear();
+        if (logFile != null) logFile.delete();
+        log("日志已清空");
+    }
+
+    // 临时文件全局序号。
+    // 说明: tempWorkingDir() 已按任务/线程隔离目录(如 task_stzip_<n>), 目录内操作又是顺序的,
+    // 因此固定文件名在批量路径下本是安全的。这里仍加唯一序号, 是为了防御:
+    //   (a) 同一目录被复用的新调用路径(如 task_prev / task_anim 是固定名, 跨会话共享)
+    //   (b) 将来若把递归改为并行, 固定名会立刻变成数据竞争
+    // 代价仅是一个 AtomicInteger 自增。
+    private static final java.util.concurrent.atomic.AtomicInteger TMP_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     // 并发转换线程数(1=单线程, 2/4=固定, -1=自动检测CPU核心数)
     private int threadCount = 1;
 
@@ -87,6 +145,11 @@ public class TexConverter extends Activity {
         prefs = getSharedPreferences("texconv", MODE_PRIVATE);
         autoBackup = prefs.getBoolean("autoBackup", false);
         threadCount = prefs.getInt("threadCount", 1);
+        debugMode = prefs.getBoolean("debugMode", false);
+        nestedZip = prefs.getBoolean("nestedZip", true);
+        logFile = new File(getCacheDir(), "dsh_tex.log");
+        log("==== 启动 v1.4  threadCount=" + threadCount + " mode=" + convertMode
+            + " nestedZip=" + nestedZip + " backup=" + autoBackup + " ====");
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(C_BG);
@@ -326,6 +389,7 @@ public class TexConverter extends Activity {
         } catch (Exception e) {
             synchronized(results) {
                 results.add("FAIL " + input.getName() + ": " + e.getMessage());
+                logErr("转换 " + input.getName(), e);
             }
             return null;
         }
@@ -348,6 +412,7 @@ public class TexConverter extends Activity {
         } catch (Exception e) {
             synchronized(results) {
                 results.add("FAIL " + zip.getName() + ": " + e.getMessage());
+                logErr("转换 " + zip.getName(), e);
             }
             return null;
         }
@@ -390,6 +455,7 @@ public class TexConverter extends Activity {
         popup.getMenu().add("搜索文件");
         popup.getMenu().add("书签");
         popup.getMenu().add("选目录");
+        popup.getMenu().add("查看日志");
         popup.getMenu().add("关于");
         popup.setOnMenuItemClickListener(item -> {
             String t = item.getTitle().toString();
@@ -397,10 +463,45 @@ public class TexConverter extends Activity {
             else if (t.equals("搜索文件")) showSearch();
             else if (t.equals("书签")) showBookmarks();
             else if (t.equals("选目录")) pickDir();
+            else if (t.equals("查看日志")) showLog();
             else if (t.equals("关于")) showAbout();
             return true;
         });
         popup.show();
+    }
+
+    private void showLog() {
+        log("---- 打开日志查看 ----");
+        final String txt = logText();
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        TextView tv = new TextView(this);
+        tv.setText(txt);
+        tv.setTextSize(10);
+        tv.setTextIsSelectable(true);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setPadding(dp(8), dp(8), dp(8), dp(8));
+        sv.addView(tv);
+        new AlertDialog.Builder(this)
+            .setTitle("运行日志 (" + txt.split("\n").length + " 行)")
+            .setView(sv)
+            .setPositiveButton("复制", (d, w) -> {
+                android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("log", txt));
+                toast("日志已复制到剪贴板");
+            })
+            .setNeutralButton("分享", (d, w) -> {
+                try {
+                    File lf = new File(getCacheDir(), "dsh_tex.log");
+                    writeFile(lf, txt.getBytes("UTF-8"));
+                    android.content.Intent it = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                    it.setType("text/plain");
+                    it.putExtra(android.content.Intent.EXTRA_TEXT, txt);
+                    startActivity(android.content.Intent.createChooser(it, "分享日志"));
+                } catch (Throwable t2) { toast("分享失败: " + t2.getMessage()); }
+            })
+            .setNegativeButton("清空", (d, w) -> { clearLog(); toast("日志已清空"); })
+            .show();
     }
 
     private void showAbout() {
@@ -520,6 +621,20 @@ public class TexConverter extends Activity {
         cbBackup.setPadding(0, 12, 0, 0);
         panel.addView(cbBackup);
 
+        // 调试模式
+        final CheckBox cbDebug = new CheckBox(this);
+        cbDebug.setText("调试模式（预览画布上显示诊断信息、三角形描边与图集缩略图）");
+        cbDebug.setChecked(debugMode);
+        cbDebug.setPadding(0, 12, 0, 0);
+        panel.addView(cbDebug);
+
+        // 处理内嵌压缩包
+        final CheckBox cbNested = new CheckBox(this);
+        cbNested.setText("处理压缩包内的压缩包（内层若有 tex 也一并转换，逐层递归）");
+        cbNested.setChecked(nestedZip);
+        cbNested.setPadding(0, 12, 0, 0);
+        panel.addView(cbNested);
+
         // 并发线程数
         TextView t3 = new TextView(this);
         t3.setText("并发线程数（立即生效）");
@@ -559,6 +674,10 @@ public class TexConverter extends Activity {
                 if (q >= 0 && q < qualVals.length) quality = qualVals[q];
                 autoBackup = cbBackup.isChecked();
                 prefs.edit().putBoolean("autoBackup", autoBackup).apply();
+                debugMode = cbDebug.isChecked();
+                nestedZip = cbNested.isChecked();
+                prefs.edit().putBoolean("nestedZip", nestedZip).apply();
+                prefs.edit().putBoolean("debugMode", debugMode).apply();
                 try {
                     int sel = rgThreads.getCheckedRadioButtonId();
                     threadCount = Integer.parseInt(threadVals[sel]);
@@ -1006,7 +1125,7 @@ public class TexConverter extends Activity {
     private void previewTex(final File tex) {
         toast("正在解码 " + tex.getName() + " ...");
         new Thread(() -> {
-            File tmpDir = tempWorkingDir("prev");
+            File tmpDir = tempWorkingDir("prev_" + TMP_SEQ.incrementAndGet());
             try {
                 byte[] data = readFile(tex);
                 final int comp = readTexCompression(data);
@@ -1075,46 +1194,545 @@ public class TexConverter extends Activity {
             .show();
     }
 
-    // ---------- zip 浏览 ----------
-    private void openZip(File zip) {
+
+    // ================= DST 动画 (anim.bin / build.bin) =================
+    // 格式依据 ktools/krane, 已用真实样本逐字节验证(解析到文件末尾剩余 0)
+
+    static class BinReader {
+        final byte[] d; int p = 0;
+        BinReader(byte[] b) { d = b; }
+        int u8() { return d[p++] & 0xFF; }
+        int u32() {
+            int v = (d[p] & 0xFF) | ((d[p+1] & 0xFF) << 8)
+                  | ((d[p+2] & 0xFF) << 16) | ((d[p+3] & 0xFF) << 24);
+            p += 4; return v;
+        }
+        long u32l() { return u32() & 0xFFFFFFFFL; }
+        float f32() { return Float.intBitsToFloat(u32()); }
+        String str() {
+            int n = u32();
+            String s = new String(d, p, n, java.nio.charset.StandardCharsets.UTF_8);
+            p += n; return s;
+        }
+        int left() { return d.length - p; }
+    }
+
+    static class BFrame {
+        int alphaidx;      // 该帧顶点在全局顶点区中的起始下标
+        int framenum, duration;
+        float x, y, w, h;
+        int ntris;
+        float[] xyz;   // ntris*9: 每三角形 3 顶点 × (x,y,z)
+        float[] uv;    // ntris*9: 每三角形 3 顶点 × (u,v,w)
+    }
+    static class BSymbol { long hash; String name; BFrame[] frames; }
+    static class BuildFile {
+        String name; String[] atlases;
+        final java.util.LinkedHashMap<Long, BSymbol> symbols = new java.util.LinkedHashMap<>();
+    }
+    static class AElement {
+        long hash; int buildFrame; long layer;
+        float a, b, c, d, tx, ty, z;
+        int txOffset = -1;   // tx 字段在 anim.bin 中的字节偏移(用于原地改写)
+    }
+    static class AFrame { float x, y, w, h; AElement[] elems; }
+    static class AAnim {
+        String name; int facing; long bank; float frameRate; AFrame[] frames;
+    }
+    static class AnimFile { AAnim[] anims; }
+
+    static BuildFile parseBuild(byte[] d) throws Exception {
+        if (d.length < 8 || d[0] != 'B' || d[1] != 'I' || d[2] != 'L' || d[3] != 'D')
+            throw new Exception("不是 build.bin");
+        BinReader r = new BinReader(d);
+        r.p = 4; r.u32();
+        BuildFile b = new BuildFile();
+        int nsym = r.u32();
+        r.u32();
+        b.name = r.str();
+        int natlas = r.u32();
+        b.atlases = new String[natlas];
+        for (int i = 0; i < natlas; i++) b.atlases[i] = r.str();
+        BSymbol[] syms = new BSymbol[nsym];
+        for (int i = 0; i < nsym; i++) {
+            BSymbol s = new BSymbol();
+            s.hash = r.u32l();
+            int nf = r.u32();
+            s.frames = new BFrame[nf];
+            for (int j = 0; j < nf; j++) {
+                BFrame f = new BFrame();
+                f.framenum = r.u32(); f.duration = r.u32();
+                f.x = r.f32(); f.y = r.f32(); f.w = r.f32(); f.h = r.f32();
+                f.alphaidx = r.u32();      // 顶点起始下标(此前被丢弃 -> 顶点错配)
+                f.ntris = r.u32() / 3;
+                s.frames[j] = f;
+            }
+            syms[i] = s;
+        }
+        // 顶点区: 物理顺序与符号表顺序无关, 必须用每帧的 alphaidx 定位。
+        // (alchmy 那种单符号资产顶点恰好顺序排列, 顺序读法碰巧正确;
+        //  多符号角色的顶点区被打乱重排, 顺序读法会把别的帧的顶点配错。)
+        int totalVerts = r.u32();
+        if (totalVerts < 0) throw new Exception("顶点数异常: " + totalVerts);
+        float[] vx = new float[totalVerts], vy = new float[totalVerts], vz = new float[totalVerts];
+        float[] vu = new float[totalVerts], vv = new float[totalVerts], vw = new float[totalVerts];
+        for (int i = 0; i < totalVerts; i++) {
+            vx[i] = r.f32(); vy[i] = r.f32(); vz[i] = r.f32();
+            vu[i] = r.f32(); vv[i] = r.f32(); vw[i] = r.f32();
+        }
+        for (BSymbol s : syms) {
+            for (BFrame f : s.frames) {
+                int n = f.ntris * 3;
+                f.xyz = new float[n * 3];
+                f.uv  = new float[n * 3];
+                for (int k = 0; k < n; k++) {
+                    int idx = f.alphaidx + k;
+                    if (idx < 0 || idx >= totalVerts) continue;   // 越界保持 0
+                    f.xyz[k*3    ] = vx[idx];
+                    f.xyz[k*3 + 1] = vy[idx];
+                    f.xyz[k*3 + 2] = vz[idx];
+                    f.uv [k*3    ] = vu[idx];
+                    f.uv [k*3 + 1] = vv[idx];
+                    f.uv [k*3 + 2] = vw[idx];
+                }
+            }
+        }
+        int htsz = r.u32();
+        for (int i = 0; i < htsz; i++) {
+            long h = r.u32l();
+            String nm = r.str();
+            for (BSymbol s : syms) if (s.hash == h) s.name = nm;
+        }
+        for (BSymbol s : syms) b.symbols.put(s.hash, s);
+        return b;
+    }
+
+    static AnimFile parseAnim(byte[] d) throws Exception {
+        if (d.length < 8 || d[0] != 'A' || d[1] != 'N' || d[2] != 'I' || d[3] != 'M')
+            throw new Exception("不是 anim.bin");
+        BinReader r = new BinReader(d);
+        r.p = 4; r.u32();
+        r.u32(); r.u32(); r.u32();
+        int nanim = r.u32();
+        AnimFile a = new AnimFile();
+        a.anims = new AAnim[nanim];
+        for (int i = 0; i < nanim; i++) {
+            AAnim an = new AAnim();
+            an.name = r.str();
+            an.facing = r.u8();          // 注意: 1 字节
+            an.bank = r.u32l();
+            an.frameRate = r.f32();
+            int nf = r.u32();
+            an.frames = new AFrame[nf];
+            for (int j = 0; j < nf; j++) {
+                AFrame f = new AFrame();
+                f.x = r.f32(); f.y = r.f32(); f.w = r.f32(); f.h = r.f32();
+                int nev = r.u32();
+                for (int k = 0; k < nev; k++) r.u32();
+                int nel = r.u32();
+                f.elems = new AElement[nel];
+                for (int k = 0; k < nel; k++) {
+                    AElement e = new AElement();
+                    e.hash = r.u32l();
+                    e.buildFrame = r.u32();
+                    e.layer = r.u32l();
+                    e.a = r.f32(); e.b = r.f32(); e.c = r.f32();
+                    e.d = r.f32();
+                    e.txOffset = r.p;          // 记录 tx 起始偏移
+                    e.tx = r.f32(); e.ty = r.f32();
+                    e.z = r.f32();
+                    f.elems[k] = e;
+                }
+                an.frames[j] = f;
+            }
+            a.anims[i] = an;
+        }
+        return a;
+    }
+
+    /**
+     * 从压缩包载入动画资产(供编辑器「导入」使用)。
+     * 解析 build.bin / anim.bin 并解码图集, 结果写入共享静态字段。
+     * @return 成功与否
+     */
+    static boolean loadAnimAsset(android.content.Context ctx, java.io.File zip) {
+        try {
+            java.util.zip.ZipFile zf = new java.util.zip.ZipFile(zip);
+            byte[] animD = null, buildD = null, atlasD = null;
+            java.util.Enumeration<? extends java.util.zip.ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                java.util.zip.ZipEntry ze = en.nextElement();
+                String ln = ze.getName().toLowerCase();
+                if (ln.endsWith("anim.bin")) animD = readAllStatic(zf.getInputStream(ze));
+                else if (ln.endsWith("build.bin")) buildD = readAllStatic(zf.getInputStream(ze));
+                else if (ln.endsWith(".tex") && atlasD == null) atlasD = readAllStatic(zf.getInputStream(ze));
+            }
+            zf.close();
+            if (animD == null || buildD == null || atlasD == null) return false;
+
+            BuildFile build = parseBuild(buildD);
+            AnimFile anim = parseAnim(animD);
+            if (anim.anims.length == 0) return false;
+
+            // 解码图集: KTEX(ASTC) -> PNG -> Bitmap
+            java.io.File dir = new java.io.File(ctx.getCacheDir(), "import");
+            dir.mkdirs();
+            java.io.File astc = new java.io.File(dir, "a.astc");
+            java.io.File png = new java.io.File(dir, "a.png");
+            int comp = readTexCompressionStatic(atlasD);
+            if (comp == 24) {
+                KtexInfo info = unpackKtex(atlasD);
+                byte[] full = new byte[info.raw.length + 16];
+                writeAstcHeader(full, info.w, info.h);
+                System.arraycopy(info.raw, 0, full, 16, info.raw.length);
+                java.io.FileOutputStream fo = new java.io.FileOutputStream(astc);
+                fo.write(full); fo.close();
+                runAstcenc("-dl", astc.getAbsolutePath(), png.getAbsolutePath());
+            } else {
+                return false;   // 仅支持 ASTC 图集
+            }
+            android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeFile(png.getAbsolutePath());
+            if (bmp == null) return false;
+
+            sBuild = build;
+            sAnim = anim;
+            sAtlas = bmp;
+            sAnimBytes = animD;
+            sAnimZip = zip;
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static byte[] readAllStatic(java.io.InputStream in) throws Exception {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[65536];
+        int n;
+        while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+        in.close();
+        return bo.toByteArray();
+    }
+
+    private static int readTexCompressionStatic(byte[] b) throws Exception {
+        if (b.length < 8 || b[0] != 'K' || b[1] != 'T' || b[2] != 'E' || b[3] != 'X')
+            throw new Exception("不是 KTEX 文件");
+        int hdr = ((b[7] & 0xFF) << 24) | ((b[6] & 0xFF) << 16) | ((b[5] & 0xFF) << 8) | (b[4] & 0xFF);
+        return (hdr >> 4) & 0x1F;
+    }
+
+    // ---- 供 AnimEditor(独立编辑界面) 共享的数据 ----
+    static BuildFile sBuild;
+    static AnimFile sAnim;
+    static Bitmap sAtlas;
+    static byte[] sAnimBytes;
+    static File sAnimZip;
+
+    // 跳到独立编辑界面(横屏)
+    private void launchAnimEditor(File zip, BuildFile build, AnimFile anim, Bitmap atlas, byte[] animBytes) {
+        sBuild = build; sAnim = anim; sAtlas = atlas; sAnimBytes = animBytes; sAnimZip = zip;
+        startActivity(new Intent(this, AnimEditor.class));
+    }
+
+    // ---- 动画渲染视图: 按三角形逐块贴图 ----
+    // 关键点:
+    //  1) 显式做坐标变换, 不用 pre/post 语义(易错)
+    //  2) 锚点取整个动画的包围盒中心, 避免逐帧抖动
+    //  3) 每三角形用 setPolyToPoly 求仿射, 不依赖四边形配对
+    private class AnimView extends View {
+        Bitmap atlas;
+        BuildFile build;
+        AAnim anim;
+        int frame = 0;
+        float zoom = 1f;
+        boolean flipV = false;
+        // 目标朝向: 0=原样 1=旋转180 2=上下翻转 3=左右翻转
+        // 默认 2: KTEX 为垂直翻转存储, 需要且只需要补偿一个垂直镜像。
+        // (曾误设为 1(旋转180), 那是水平+垂直都翻 -> 表现为左右相反)
+        int dstMode = 2;
+        float anCx = 0f, anCy = 0f, spanW = 1f, spanH = 1f;
+        final android.graphics.Paint paint = new android.graphics.Paint();
+        final android.graphics.Path tri = new android.graphics.Path();
+        final float[] srcPts = new float[6];
+        final float[] dstPts = new float[6];
+
+        AnimView(android.content.Context c) {
+            super(c);
+            setOnLongClickListener(v -> { toggleUv(); toast("UV 翻转: " + (rnd.flipUv ? "开" : "关")); return true; });
+            // 硬件加速下 BitmapShader.setLocalMatrix 与 clipPath 都不可靠,
+            // 改用软件渲染(图层), 两者均恢复完整语义
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        }
+
+        void setData(Bitmap a, BuildFile b, AAnim an) {
+            atlas = a; build = b; anim = an; frame = 0;
+            dbgStroke.setStyle(android.graphics.Paint.Style.STROKE);
+            dbgStroke.setStrokeWidth(1.5f);
+            dbgStroke.setColor(0xFF00FF88);
+            float mnx = Float.MAX_VALUE, mny = Float.MAX_VALUE;
+            float mxx = -Float.MAX_VALUE, mxy = -Float.MAX_VALUE;
+            for (AFrame f : an.frames) {
+                mnx = Math.min(mnx, f.x);
+                mny = Math.min(mny, f.y);
+                mxx = Math.max(mxx, f.x + f.w);
+                mxy = Math.max(mxy, f.y + f.h);
+            }
+            if (mnx > mxx) { mnx = 0; mny = 0; mxx = 1; mxy = 1; }
+            anCx = (mnx + mxx) / 2f;
+            anCy = (mny + mxy) / 2f;
+            spanW = Math.max(1f, mxx - mnx);
+            spanH = Math.max(1f, mxy - mny);
+            invalidate();
+        }
+
+        void setFrame(int f) { frame = f; invalidate(); }
+        void toggleFlip() { flipV = !flipV; invalidate(); }
+        void cycleDst() { dstMode = (dstMode + 1) % 4; invalidate(); }
+        void toggleUv() { rnd.flipUv = !rnd.flipUv; invalidate(); }
+        void toggleZOrder() { rnd.zDescending = !rnd.zDescending; invalidate(); }
+
+        String dbgErr = null;
+        final AnimRenderer rnd = new AnimRenderer();
+        final android.graphics.Paint dbgStroke = new android.graphics.Paint();
+
+        private void dbgText(android.graphics.Canvas cv, String t, float y) {
+            android.graphics.Paint p = new android.graphics.Paint();
+            p.setColor(0xFFFFEE55);
+            p.setTextSize(20f);
+            cv.drawText(t, 10, y, p);
+        }
+
+        @Override protected void onDraw(android.graphics.Canvas cv) {
+            cv.drawColor(0xFF303030);
+            dbgErr = null;
+            try {
+                drawScene(cv);
+            } catch (Throwable t) {
+                dbgErr = t.getClass().getSimpleName() + ": " + t.getMessage();
+            }
+            // 诊断叠层: 仅在调试模式下绘制(代码保留)
+            if (TexConverter.this.debugMode) drawDebugOverlay(cv);
+        }
+
+        private void drawDebugOverlay(android.graphics.Canvas cv) {
+            float y = 26;
+            dbgText(cv, "BUILD=v32-tapzip zDesc=" + (rnd.zDescending ? 1 : 0), y); y += 24;
+            dbgText(cv, "atlas=" + (atlas == null ? "null" : atlas.getWidth() + "x" + atlas.getHeight()), y); y += 24;
+            dbgText(cv, "anim=" + (anim == null ? "null" : anim.name)
+                       + " frames=" + (anim == null ? 0 : anim.frames.length)
+                       + " elems0=" + (anim == null || anim.frames.length == 0 ? 0 : anim.frames[0].elems.length), y); y += 24;
+            dbgText(cv, "view=" + getWidth() + "x" + getHeight(), y); y += 24;
+            dbgText(cv, "elems " + rnd.elemsMatched + "/" + rnd.elemsTotal
+                       + " unmatched=" + rnd.elemsUnmatched
+                       + " lastBad=0x" + Integer.toHexString(rnd.lastHash).toUpperCase()
+                       + " bf=" + rnd.lastBF, y); y += 24;
+            dbgText(cv, "tris=" + rnd.tris + " clipFail=" + rnd.clipFail, y); y += 24;
+            dbgText(cv, "satlas_idx=" + (build == null ? 0 : build.symbols.size()), y); y += 24;
+            if (dbgErr != null) dbgText(cv, "ERR " + dbgErr, y);
+            // 图集缩略图(左下角) + 像素统计
+            try {
+                int tw = 140, th = 140;
+                int tx = 10, ty2 = getHeight() - th - 10;
+                if (ty2 > 0) {
+                    android.graphics.Rect sr = new android.graphics.Rect(0, 0, atlas.getWidth(), atlas.getHeight());
+                    android.graphics.Rect dr = new android.graphics.Rect(tx, ty2, tx + tw, ty2 + th);
+                    android.graphics.Paint ip = new android.graphics.Paint();
+                    ip.setFilterBitmap(true);
+                    cv.drawBitmap(atlas, sr, dr, ip);
+                    android.graphics.Paint bd = new android.graphics.Paint();
+                    bd.setStyle(android.graphics.Paint.Style.STROKE);
+                    bd.setColor(0xFFFF0000);
+                    cv.drawRect(dr, bd);
+                    // 统计非透明像素比例
+                    int nz = 0, tot = 0;
+                    for (int yy = 0; yy < atlas.getHeight(); yy += 32) {
+                        for (int xx = 0; xx < atlas.getWidth(); xx += 32) {
+                            int px = atlas.getPixel(xx, yy);
+                            tot++;
+                            if ((px >>> 24) > 8) nz++;
+                        }
+                    }
+                    dbgText(cv, "atlasAlpha>8: " + nz + "/" + tot, ty2 - 8);
+                    // 在 UV 区域内采样: 分别按 不翻转 / 翻转 两种 v 方向统计非透明像素
+                    if (rnd.uvMxx > rnd.uvMnx && rnd.uvMxy > rnd.uvMny) {
+                        int n0 = 0, n1 = 0, tt = 0;
+                        for (int i = 0; i <= 8; i++) {
+                            for (int j = 0; j <= 8; j++) {
+                                float uu = rnd.uvMnx + (rnd.uvMxx - rnd.uvMnx) * i / 8f;
+                                float vv = rnd.uvMny + (rnd.uvMxy - rnd.uvMny) * j / 8f;
+                                int xa = (int)(uu * atlas.getWidth());
+                                int ya = (int)(vv * atlas.getHeight());
+                                int yb = (int)((1f - vv) * atlas.getHeight());
+                                xa = Math.max(0, Math.min(atlas.getWidth() - 1, xa));
+                                ya = Math.max(0, Math.min(atlas.getHeight() - 1, ya));
+                                yb = Math.max(0, Math.min(atlas.getHeight() - 1, yb));
+                                tt++;
+                                if ((atlas.getPixel(xa, ya) >>> 24) > 8) n0++;
+                                if ((atlas.getPixel(xa, yb) >>> 24) > 8) n1++;
+                            }
+                        }
+                        dbgText(cv, "uvRegion NOFLIP=" + n0 + "/" + tt + "  FLIP=" + n1 + "/" + tt, y);
+                    }
+                    // 在缩略图上标出当前帧 UV 覆盖的范围(黄框)
+                    if (rnd.uvMxx > rnd.uvMnx) {
+                        android.graphics.Paint uvP = new android.graphics.Paint();
+                        uvP.setStyle(android.graphics.Paint.Style.STROKE);
+                        uvP.setStrokeWidth(2f);
+                        uvP.setColor(0xFFFFFF00);
+                        float rx0 = tx + rnd.uvMnx * tw, rx1 = tx + rnd.uvMxx * tw;
+                        float ry0 = ty2 + rnd.uvMny * th, ry1 = ty2 + rnd.uvMxy * th;
+                        cv.drawRect(Math.min(rx0,rx1), Math.min(ry0,ry1),
+                                    Math.max(rx0,rx1), Math.max(ry0,ry1), uvP);
+                        dbgText(cv, "uv=(" + String.format("%.3f", rnd.uvMnx) + "," + String.format("%.3f", rnd.uvMny)
+                                   + ")-(" + String.format("%.3f", rnd.uvMxx) + "," + String.format("%.3f", rnd.uvMxy) + ")", y);
+                    }
+                }
+            } catch (Throwable t) {
+                dbgText(cv, "THUMB_ERR " + t, 200);
+            }
+        }
+
+        private void drawScene(android.graphics.Canvas cv) {
+            if (atlas == null || anim == null || anim.frames.length == 0) return;
+            final float fit = Math.min(getWidth() / spanW, getHeight() / spanH) * 0.85f;
+            final float sc = fit * zoom;
+            final float ox = getWidth() / 2f, oy = getHeight() / 2f;
+            final int m = dstMode;
+            // 动画坐标 -> 屏幕坐标; 朝向由 dstMode 决定(0原样 1旋转180 2上下 3左右)
+            AnimRenderer.Xform xf = new AnimRenderer.Xform() {
+                public float x(float ax) {
+                    float e = (ax - anCx) * sc;
+                    return ox + ((m == 1 || m == 3) ? -e : e);
+                }
+                public float y(float ay) {
+                    float f = (ay - anCy) * sc;
+                    return oy + ((m == 1 || m == 2) ? f : -f);
+                }
+            };
+            rnd.draw(cv, atlas, build, anim, frame, xf, TexConverter.this.debugMode);
+        }
+    }
+
+    private void openAnimZip(final File zip) { openAnimZip(zip, false); }
+
+    /** @param editDirectly true 则解析完成后直接进入横屏编辑器, 不弹预览框 */
+    private void openAnimZip(final File zip, final boolean editDirectly) {
+        toast("正在解析 " + zip.getName() + " ...");
         new Thread(() -> {
+            File tmpDir = tempWorkingDir("anim_" + TMP_SEQ.incrementAndGet());
             try {
                 ZipFile zf = new ZipFile(zip);
-                final List<String> names = new ArrayList<>();
+                byte[] animD = null, buildD = null, atlasD = null;
                 java.util.Enumeration<? extends ZipEntry> en = zf.entries();
                 while (en.hasMoreElements()) {
                     ZipEntry ze = en.nextElement();
-                    if (!ze.isDirectory()) {
-                        String nn = ze.getName().toLowerCase();
-                        if (nn.endsWith(".tex") || nn.endsWith(".png")) names.add(ze.getName());
-                    }
+                    String ln = ze.getName().toLowerCase();
+                    if (ln.endsWith("anim.bin")) animD = readAll(zf.getInputStream(ze));
+                    else if (ln.endsWith("build.bin")) buildD = readAll(zf.getInputStream(ze));
+                    else if (ln.endsWith(".tex") && atlasD == null) atlasD = readAll(zf.getInputStream(ze));
                 }
                 zf.close();
-                if (names.isEmpty()) { runOnUiThread(() -> toast("zip 内无 tex/png")); return; }
-                runOnUiThread(() -> new AlertDialog.Builder(this)
-                    .setTitle(zip.getName() + " 内纹理（" + names.size() + " 个）")
-                    .setItems(names.toArray(new String[0]), null)
-                    .setPositiveButton("转换 zip 内全部 DXT", (d, w) -> new Thread(() -> {
-                        try {
-                            File zdir = tempWorkingDir("openzip_" + Thread.currentThread().getId());
-                            final String r;
-                            try {
-                                r = convertZipReplace(zip, zdir);
-                            } finally {
-                                File[] zs = zdir.listFiles();
-                                if (zs != null) for (File c : zs) c.delete();
-                                zdir.delete();
-                            }
-                            runOnUiThread(() -> toast(r));
-                        } catch (Exception e) {
-                            runOnUiThread(() -> toast("zip 转换失败: " + e.getMessage()));
-                        }
-                    }).start())
-                    .setNegativeButton("取消", null).show());
+                if (animD == null || buildD == null) throw new Exception("zip 内缺 anim.bin 或 build.bin");
+                final BuildFile build = parseBuild(buildD);
+                final AnimFile anim = parseAnim(animD);
+                Bitmap atlas = null;
+                if (atlasD != null) {
+                    File tf = new File(tmpDir, "a.tex");
+                    writeFile(tf, atlasD);
+                    int comp = readTexCompression(atlasD);
+                    File png = new File(tmpDir, "a.png");
+                    if (comp == 24) {
+                        KtexInfo info = unpackKtex(atlasD);
+                        File astc = new File(tmpDir, "a.astc");
+                        byte[] full = new byte[info.raw.length + 16];
+                        writeAstcHeader(full, info.w, info.h);
+                        System.arraycopy(info.raw, 0, full, 16, info.raw.length);
+                        writeFile(astc, full);
+                        runAstcenc("-dl", astc.getAbsolutePath(), png.getAbsolutePath());
+                    } else {
+                        runTex2png(tf.getAbsolutePath(), png.getAbsolutePath());
+                    }
+                    atlas = BitmapFactory.decodeFile(png.getAbsolutePath());
+                }
+                final Bitmap fa = atlas;
+                final byte[] fanimD = animD;
+                runOnUiThread(() -> {
+                    if (editDirectly) launchAnimEditor(zip, build, anim, fa, fanimD);
+                    else showAnimDialog(zip, zip.getName(), build, anim, fa, fanimD);
+                });
             } catch (Exception e) {
-                runOnUiThread(() -> toast("zip 读取失败: " + e.getMessage()));
+                runOnUiThread(() -> toast("动画解析失败: " + e.getMessage()));
             }
         }).start();
+    }
+
+    private void showAnimDialog(File zip, String title, BuildFile build, AnimFile anim, Bitmap atlas, byte[] animBytes) {
+        if (anim.anims.length == 0) { toast("无动画"); return; }
+        final AAnim an = anim.anims[0];
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextView info = new TextView(this);
+        info.setTextSize(12);
+        info.setTextColor(C_TEXT_SUB);
+        info.setPadding(dp(12), dp(8), dp(12), dp(4));
+        info.setText("build " + build.name + " | 动画 " + an.name
+            + " | 帧 " + an.frames.length + " | " + an.frameRate + " fps"
+            + " | 图集 " + (atlas == null ? "无" : atlas.getWidth() + "x" + atlas.getHeight()));
+        col.addView(info);
+        final AnimView av = new AnimView(this);
+        if (atlas != null) av.setData(atlas, build, an);
+        col.addView(av, new LinearLayout.LayoutParams(-1, 0, 1));
+        final android.widget.SeekBar sb = new android.widget.SeekBar(this);
+        sb.setMax(Math.max(0, an.frames.length - 1));
+        sb.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(android.widget.SeekBar s, int v, boolean u) { av.setFrame(v); }
+            public void onStartTrackingTouch(android.widget.SeekBar s) {}
+            public void onStopTrackingTouch(android.widget.SeekBar s) {}
+        });
+        col.addView(sb);
+
+        // ---- 工具按钮行(直接可点, 不依赖长按) ----
+        LinearLayout tools = new LinearLayout(this);
+        tools.setOrientation(LinearLayout.HORIZONTAL);
+        final android.widget.Button btnUv = new android.widget.Button(this);
+        btnUv.setText("翻转UV: " + (av.rnd.flipUv ? "开" : "关"));
+        btnUv.setOnClickListener(v -> {
+            av.toggleUv();
+            btnUv.setText("翻转UV: " + (av.rnd.flipUv ? "开" : "关"));
+        });
+        tools.addView(btnUv, new LinearLayout.LayoutParams(0, -2, 1));
+        final android.widget.Button btnDir = new android.widget.Button(this);
+        btnDir.setText("朝向: " + av.dstMode);
+        btnDir.setOnClickListener(v -> {
+            av.cycleDst();
+            btnDir.setText("朝向: " + av.dstMode);
+        });
+        tools.addView(btnDir, new LinearLayout.LayoutParams(0, -2, 1));
+        final android.widget.Button btnZ = new android.widget.Button(this);
+        btnZ.setText("层序: " + (av.rnd.zDescending ? "降" : "升"));
+        btnZ.setOnClickListener(v -> {
+            av.toggleZOrder();
+            btnZ.setText("层序: " + (av.rnd.zDescending ? "降" : "升"));
+        });
+        tools.addView(btnZ, new LinearLayout.LayoutParams(0, -2, 1));
+        col.addView(tools);
+
+        new AlertDialog.Builder(this).setTitle(title).setView(col)
+            .setNeutralButton(null, null)
+            .setPositiveButton("编辑动画(横屏)", (d, w) -> launchAnimEditor(zip, build, anim, atlas, animBytes))
+            .setNegativeButton("关闭", null).show();
+    }
+
+    // ---------- zip 浏览 ----------
+    private void openZip(File zip) {
+        // 点按 zip: 不再列出内部所有纹理文件, 只提供动画的两个入口
+        new AlertDialog.Builder(this)
+            .setTitle(zip.getName())
+            .setMessage("选择操作")
+            .setPositiveButton("预览动画", (d, w) -> openAnimZip(zip, false))
+            .setNeutralButton("编辑动画", (d, w) -> openAnimZip(zip, true))
+            .setNegativeButton("取消", null)
+            .show();
     }
 
     // ---------- 批量转换 ----------
@@ -1163,6 +1781,7 @@ public class TexConverter extends Activity {
                         }
                     } catch (Exception e) {
                         fail++; results.add("FAIL " + f.getName() + ": " + e.getMessage());
+                        logErr("递归转换 " + f.getName(), e);
                     }
                     done++;
                     final int prog = done;
@@ -1172,7 +1791,8 @@ public class TexConverter extends Activity {
                 for (File z : zipFiles) {
                     File zdir = tempWorkingDir("stzip_" + done);
                     try { String r = convertZipReplace(z, zdir); ok++; results.add("OK  " + z.getName() + " -> " + r); }
-                    catch (Exception e) { fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage()); }
+                    catch (Exception e) { fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage());
+                        logErr("批量转换 " + z.getName(), e); }
                     finally {
                         File[] zfs = zdir.listFiles();
                         if (zfs != null) for (File c : zfs) c.delete();
@@ -1256,6 +1876,7 @@ public class TexConverter extends Activity {
 
     private String convertFile(File f, File outputDir, File tmpDir) throws Exception {
         String n = f.getName().toLowerCase();
+        log("convertFile " + f.getName() + " (" + f.length() + "B) mode=" + convertMode);
         if (n.endsWith(".png")) {
             if (convertMode.equals("tex2png")) throw new Exception("当前模式为 TEX→PNG，跳过 PNG");
             return pngToTex(f, outputDir, tmpDir);
@@ -1318,8 +1939,11 @@ public class TexConverter extends Activity {
 
     // zip 内 .tex 批量转换（替换 zip 内条目，原 zip 备份 .bak）
     private String convertZipReplace(File zip, File tmpDir) throws Exception {
+        log("convertZip " + zip.getName() + " (" + zip.length() + "B) nested=" + nestedZip);
+        final int[] skip = new int[2];      // [0]=已是ASTC, [1]=模式不符
         int ok = 0;
-        File tmp = new File(tmpDir, "new.zip");
+        // 文件名唯一: 多线程批量转换时同一 tmpDir 下不能撞名
+        File tmp = new File(tmpDir, "new_" + TMP_SEQ.incrementAndGet() + ".zip");
         ZipFile zf = new ZipFile(zip);
         ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(tmp));
         java.util.Enumeration<? extends ZipEntry> en = zf.entries();
@@ -1331,14 +1955,22 @@ public class TexConverter extends Activity {
             zos.putNextEntry(ne);
             if (!ze.isDirectory() && n.endsWith(".tex")) {
                 byte[] data = readAll(zf.getInputStream(ze));
-                int comp = readTexCompression(data);
-                if (comp != 24) {
-                    data = convertTexBytes(data, tmpDir);
-                    ok++;
+                try {
+                    byte[] out2 = convertTexByMode(data, tmpDir, ze.getName(), skip);
+                    if (out2 != data) ok++;
+                    data = out2;
+                } catch (Exception ex) {
+                    log("    跳过 " + ze.getName() + ": " + ex.getMessage());
                 }
                 zos.write(data);
+            } else if (!ze.isDirectory() && n.endsWith(".zip") && nestedZip) {
+                // 内嵌压缩包: 递归处理其中(及其内层)的 tex
+                byte[] inner = readAll(zf.getInputStream(ze));
+                Object[] r = convertZipBytes(inner, tmpDir, skip);
+                zos.write((byte[]) r[0]);
+                ok += (Integer) r[1];
             } else {
-                // 非 .tex 条目流式拷贝, 避免整包读入内存导致大 zip OOM
+                // 其余条目流式拷贝, 避免整包读入内存导致大 zip OOM
                 InputStream in = zf.getInputStream(ze);
                 byte[] buf = new byte[65536];
                 int r;
@@ -1349,20 +1981,147 @@ public class TexConverter extends Activity {
         }
         zos.close();
         zf.close();
+        if (ok == 0) log("!! 顶层 zip 未发现任何可转换的 .tex —— 请对照上方内嵌 zip 的类型分布确认");
         if (autoBackup) {
             File bak = new File(zip.getAbsolutePath() + ".bak");
             if (!bak.exists()) copyFile(zip, bak);
         }
         copyFile(tmp, zip);
         tmp.delete();
-        return "zip 内 " + ok + " 个 tex 已转换";
+        String tail = "";
+        if (skip[0] > 0) tail += ", " + skip[0] + " 个已是 ASTC 跳过";
+        if (skip[1] > 0) tail += ", " + skip[1] + " 个模式不符跳过";
+        log("convertZip 完成 " + zip.getName() + " -> 转换 " + ok + tail);
+        return "zip 内 " + ok + " 个 tex 已转换" + tail;
+    }
+
+    /**
+     * 递归处理 zip 字节流: 转换其中以及内嵌 zip(可多层)中的全部非 ASTC tex。
+     * @return {处理后的 zip 字节, 累计转换个数}
+     */
+    private static final int MAX_ZIP_DEPTH = 8;
+
+    private Object[] convertZipBytes(byte[] zipData, File tmpDir, int[] skip) throws Exception {
+        return convertZipBytes(zipData, tmpDir, 0, skip);
+    }
+
+    private Object[] convertZipBytes(byte[] zipData, File tmpDir, int depth, int[] skip) throws Exception {
+        if (depth > MAX_ZIP_DEPTH) return new Object[]{zipData, 0};   // 超深则原样返回
+        final int seq = TMP_SEQ.incrementAndGet();
+        log("  内嵌 zip depth=" + depth + " " + zipData.length + "B");
+        java.util.HashMap<String,Integer> extCnt = new java.util.HashMap<>();
+        int entryTotal = 0, nameSample = 0;
+        StringBuilder nameBuf = new StringBuilder();
+        File in = new File(tmpDir, "inner_" + seq + "_in.zip");
+        File out = new File(tmpDir, "inner_" + seq + "_out.zip");
+        writeFile(in, zipData);
+        int ok = 0;
+        ZipFile zf = new ZipFile(in);
+        ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(out));
+        java.util.Enumeration<? extends ZipEntry> en = zf.entries();
+        while (en.hasMoreElements()) {
+            ZipEntry ze = en.nextElement();
+            String n = ze.getName().toLowerCase();
+            ZipEntry ne = new ZipEntry(ze.getName());
+            if (ze.getTime() > 0) ne.setTime(ze.getTime());
+            zos.putNextEntry(ne);
+            // 统计: 记录条目类型分布, 便于判断"为什么没找到 tex"
+            if (!ze.isDirectory()) {
+                entryTotal++;
+                int dot = n.lastIndexOf('.');
+                String ext = dot >= 0 ? n.substring(dot) : "(无扩展名)";
+                Integer c = extCnt.get(ext);
+                extCnt.put(ext, c == null ? 1 : c + 1);
+                if (nameSample < 3) { nameBuf.append('\n').append("      ").append(ze.getName()); nameSample++; }
+            }
+            if (!ze.isDirectory() && n.endsWith(".tex")) {
+                byte[] data = readAll(zf.getInputStream(ze));
+                try {
+                    byte[] out2 = convertTexByMode(data, tmpDir, ze.getName(), skip);
+                    if (out2 != data) ok++;
+                    data = out2;
+                } catch (Exception ex) {
+                    log("    跳过 " + ze.getName() + ": " + ex.getMessage());
+                }
+                zos.write(data);
+            } else if (!ze.isDirectory() && n.endsWith(".zip")) {
+                byte[] inner = readAll(zf.getInputStream(ze));
+                Object[] r = convertZipBytes(inner, tmpDir, depth + 1, skip);
+                zos.write((byte[]) r[0]);
+                ok += (Integer) r[1];
+            } else {
+                InputStream ins = zf.getInputStream(ze);
+                byte[] buf = new byte[65536];
+                int r;
+                while ((r = ins.read(buf)) > 0) zos.write(buf, 0, r);
+                ins.close();
+            }
+            zos.closeEntry();
+        }
+        zos.close();
+        zf.close();
+        // 输出条目类型分布(仅顶层 depth, 避免日志爆量)
+        if (entryTotal > 0 && depth == 0) {
+            log("    条目 " + entryTotal + " 个, 类型: " + extCnt);
+            log("    名称样例:" + nameBuf);
+        } else if (entryTotal == 0) {
+            log("    !! 该 zip 内没有文件条目");
+        }
+        FileInputStream fis = new FileInputStream(out);
+        byte[] res = readAll(fis);
+        in.delete(); out.delete();
+        return new Object[]{res, ok};
+    }
+
+    /**
+     * 按当前转换模式处理一份 tex 字节(顶层与内嵌压缩包共用, 保证行为一致)。
+     * 之前内嵌分支漏了模式判断, 导致所选模式对嵌套层失效。
+     * @return 处理后的字节; 若按当前模式无需处理则原样返回
+     */
+    private byte[] convertTexByMode(byte[] data, File tmpDir, String name, int[] skip) throws Exception {
+        int comp = readTexCompression(data);
+        log("    tex " + name + " comp=" + comp + " mode=" + convertMode);
+        if (convertMode.equals("png2tex")) {
+            skip[1]++;
+            log("    跳过(模式不符) " + name);
+            return data;
+        }
+        if (convertMode.equals("dxt2astc") && comp == 24) {
+            skip[0]++;
+            log("    跳过(已是 ASTC) " + name);
+            return data;
+        }
+        if (convertMode.equals("tex2png")) {
+            File t = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".tex");
+            writeFile(t, data);
+            File p = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".png");
+            runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
+            byte[] png = readAll(new FileInputStream(p));
+            t.delete(); p.delete();
+            return png;
+        }
+        if (convertMode.equals("dxt2astc")) {
+            return convertTexBytes(data, tmpDir);
+        }
+        // auto: ASTC -> PNG, 其余 -> ASTC
+        if (comp == 24) {
+            File t = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".tex");
+            writeFile(t, data);
+            File p = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".png");
+            runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
+            byte[] png = readAll(new FileInputStream(p));
+            t.delete(); p.delete();
+            return png;
+        }
+        return convertTexBytes(data, tmpDir);
     }
 
     // 内存中把 DXT/RGBA tex 字节转成 ASTC tex 字节
     private byte[] convertTexBytes(byte[] texData, File tmpDir) throws Exception {
-        File tmpTex = new File(tmpDir, "tmp.tex");
+        final int seq = TMP_SEQ.incrementAndGet();
+        File tmpTex = new File(tmpDir, "tmp_" + seq + ".tex");
         writeFile(tmpTex, texData);
-        File png = new File(tmpDir, "tmp.png");
+        File png = new File(tmpDir, "tmp_" + seq + ".png");
         runTex2png(tmpTex.getAbsolutePath(), png.getAbsolutePath());
         int[] wh = readPngSize(png);
         return buildAstcKtex(png, tmpDir);
@@ -1449,7 +2208,7 @@ public class TexConverter extends Activity {
         return packKtexLevels(dims, datas);
     }
 
-    private KtexInfo unpackKtex(byte[] ktex) throws Exception {
+    static KtexInfo unpackKtex(byte[] ktex) throws Exception {
         if (ktex.length < 18 || ktex[0] != 'K' || ktex[1] != 'T' || ktex[2] != 'E' || ktex[3] != 'X')
             throw new Exception("不是 KTEX 文件");
         ByteBuffer bb = ByteBuffer.wrap(ktex).order(ByteOrder.LITTLE_ENDIAN);
@@ -1487,7 +2246,7 @@ public class TexConverter extends Activity {
         return raw;
     }
 
-    private void writeAstcHeader(byte[] buf, int w, int h) {
+    static void writeAstcHeader(byte[] buf, int w, int h) {
         buf[0] = 0x13; buf[1] = (byte) 0xAB; buf[2] = (byte) 0xA1; buf[3] = 0x5C;
         buf[4] = 8; buf[5] = 8; buf[6] = 1;
         buf[7] = (byte) (w & 0xFF); buf[8] = (byte) ((w >> 8) & 0xFF); buf[9] = (byte) ((w >> 16) & 0xFF);
@@ -1496,7 +2255,7 @@ public class TexConverter extends Activity {
     }
 
     // ---------- native ----------
-    private void runAstcenc(String... args) throws Exception {
+    static void runAstcenc(String... args) throws Exception {
         int code = nativeAstcenc(args);
         if (code != 0) throw new Exception("astcenc 退出码 " + code);
     }
