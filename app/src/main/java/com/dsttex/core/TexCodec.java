@@ -56,13 +56,24 @@ public final class TexCodec {
     }
 
     public static void runAstcenc(String... args) throws Exception {
+        ensureNatives();
         int code = nativeAstcenc(args);
         if (code != 0) throw new Exception("astcenc 退出码 " + code);
     }
 
     public static void runTex2png(String... args) throws Exception {
+        ensureNatives();
         int code = nativeTex2png(args);
         if (code != 0) throw new Exception("tex2png 退出码 " + code + "（文件可能不是 KTEX 或已损坏）");
+    }
+
+    /**
+     * 所有 native 调用前必须先确保库已加载。
+     * 之前只在"点转换"时检查过 available()，而预览/编辑器也直接调 native，
+     * 于是 UnsatisfiedLinkError（Error 而非 Exception）穿透 catch(Exception) 直接闪退。
+     */
+    private static void ensureNatives() throws Exception {
+        if (!available()) throw new Exception("native 引擎不可用（libastcenc/libtex2png 加载失败，详见日志）");
     }
 
     // -------------------------------------------------------------------- KTEX

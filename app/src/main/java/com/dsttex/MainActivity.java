@@ -69,6 +69,18 @@ public class MainActivity extends AppCompatActivity implements FileAdapter.Liste
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         AppLog.init(this);
+        // 全局崩溃兜底：把未捕获异常写进日志，用户可在「日志」页直接复制/分享
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            AppLog.e("未捕获异常 @ " + t.getName(), e);
+            if (prev != null) prev.uncaughtException(t, e);
+        });
+        // 尽早加载 native：预览/编辑器同样依赖，加载失败要立刻告知，而不是等用户点预览时闪退
+        if (!TexCodec.available()) {
+            android.widget.Toast.makeText(this,
+                    "转换引擎加载失败：预览与转换不可用（详见日志）",
+                    android.widget.Toast.LENGTH_LONG).show();
+        }
         settings = new Settings(this);
 
         b = ActivityMainBinding.inflate(getLayoutInflater());
@@ -443,7 +455,7 @@ public class MainActivity extends AppCompatActivity implements FileAdapter.Liste
                         } catch (Converter.Skip s) {
                             skip.incrementAndGet();
                             results.add("SKIP " + f.getName() + ": " + s.getMessage());
-                        } catch (Exception ex) {
+                        } catch (Throwable ex) {
                             fail.incrementAndGet();
                             results.add("FAIL " + f.getName() + ": " + ex.getMessage());
                             AppLog.e("转换 " + f.getName(), ex);
@@ -461,7 +473,7 @@ public class MainActivity extends AppCompatActivity implements FileAdapter.Liste
                             String r = Converter.convertZip(z, tmp, mode, quality, backup, nested);
                             ok.incrementAndGet();
                             results.add("OK   " + z.getName() + " -> " + r);
-                        } catch (Exception ex) {
+                        } catch (Throwable ex) {
                             fail.incrementAndGet();
                             results.add("FAIL " + z.getName() + ": " + ex.getMessage());
                             AppLog.e("转换 " + z.getName(), ex);
@@ -736,7 +748,7 @@ public class MainActivity extends AppCompatActivity implements FileAdapter.Liste
                             .setNegativeButton(R.string.close, null)
                             .show();
                 });
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 AppLog.e("dyn 解密失败", e);
                 ui.post(() -> toast("dyn 解密失败: " + e.getMessage()));
             } finally {

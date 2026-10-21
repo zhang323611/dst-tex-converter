@@ -101,7 +101,7 @@ public class AnimPreviewActivity extends AppCompatActivity {
                             + " | 帧 " + a.frames.length + " | " + a.frameRate + " fps"
                             + " | 图集 " + (l.atlas == null ? "无" : l.atlas.getWidth() + "x" + l.atlas.getHeight()));
                 });
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 AppLog.e("动画预览 " + zip.getName(), e);
                 runOnUiThread(() -> {
                     b.info.setText("解析失败: " + e.getMessage());

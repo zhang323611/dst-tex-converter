@@ -75,7 +75,7 @@ public class PreviewActivity extends AppCompatActivity {
                     b.image.setImageBitmap(bmp);
                     b.info.setText(info);
                 });
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 AppLog.e("预览 " + file.getName(), e);
                 runOnUiThread(() -> {
                     b.info.setText("预览失败: " + e.getMessage());

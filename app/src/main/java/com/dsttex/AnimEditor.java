@@ -116,7 +116,7 @@ public class AnimEditor extends AppCompatActivity implements AnimEditorView.List
                     updateSubtitle();
                     invalidateOptionsMenu();
                 });
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 AppLog.e("编辑器载入失败", e);
                 runOnUiThread(() -> {
                     toast("载入失败: " + e.getMessage());
@@ -350,7 +350,7 @@ public class AnimEditor extends AppCompatActivity implements AnimEditorView.List
                     else toast("已导入（无法定位原文件，保存将写回缓存副本）");
                     load(real != null ? real : tmp);
                 });
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 AppLog.e("导入失败", e);
                 runOnUiThread(() -> toast("导入失败: " + e.getMessage()));
             }
@@ -395,7 +395,7 @@ public class AnimEditor extends AppCompatActivity implements AnimEditorView.List
                     tmp.delete();
                 }
                 runOnUiThread(() -> toast("已保存: 改写 " + patched + " 个元素（原包备份 .bak）"));
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 AppLog.e("保存失败", e);
                 runOnUiThread(() -> toast("保存失败: " + e.getMessage()));
             }
