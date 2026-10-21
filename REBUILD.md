@@ -80,3 +80,74 @@
   3. zip 批量 + 嵌套 zip；`TEX→PNG` 模式下 zip 内条目是否变成 `.png`；
   4. 动画编辑器：拖动→撤销、切动画后拖帧条、保存后原包是否被改写且生成 `.bak`；
   5. 中断测试（转换中强杀进程）后原文件是否完好。
+
+---
+
+# v2.0 架构重构（UI 资源层 + Gradle/AndroidX）
+
+## 目标
+不做"重写"，而是把"用代码硬搭 UI、没有资源层、2500 行上帝类"这三件事修掉：
+先补齐资源层（A），再迁到 Gradle + AndroidX（B），同时按审查结论拆包。
+
+## 已落地
+
+### A. 资源层
+- `res/values`：`strings / colors / dimens / themes`；`values-night` 提供深色配色
+- `res/drawable`：4 个 vector 图标（替代 `☰ ⌕ ‹ ›` 这类字形图标）+ 徽标/选中背景
+- `res/layout`：11 个布局（ViewBinding 使用），`res/menu`：5 个菜单
+- 主题 `Theme.MaterialComponents.DayNight` → 系统深色模式可用
+- 副标题文字改为 `?android:attr/textColorSecondary`，对比度从 ≈3.2:1 提到 Material 默认（≈4.6:1）
+
+### B. Gradle / AndroidX
+- AGP 8.5.2 + Gradle 8.9，`compileSdk 34 / minSdk 24 / targetSdk 29`
+- AppCompatActivity + MaterialToolbar + DrawerLayout/NavigationView + RecyclerView + ViewBinding
+- native 改 CMake（`app/src/main/cpp/CMakeLists.txt`），libastcenc / libtex2png 由 AGP 编译
+- 保留签名策略：keystore 在仓库外，CI 用 `actions/cache` 固定
+
+### 拆包（原 TexConverter.java 2525 行 → 无单体）
+| 旧 | 新 |
+|---|---|
+| `TexConverter`（UI+引擎+解析混在一起） | `MainActivity`（浏览/多选/批量/搜索/书签/dyn） |
+| KTEX / dyn / 原生调用 / 文件工具 | `core/TexCodec` |
+| 转换流水线 | `core/Converter` |
+| build/anin 解析 | `core/AnimFormat`（**新增全量长度校验**） |
+| 动画载入/写回 | `core/AnimLoader` / `core/AnimWriter` |
+| 日志 | `core/AppLog` |
+| 设置读写 | `core/Settings`（**convertMode/quality 也持久化**） |
+| 列表绘制 | `ui/FileEntry` + `ui/FileAdapter`（ViewHolder，元数据预取） |
+| 画布 | `ui/AnimRendererView` / `ui/AnimEditorView` / `ui/ZoomImageView` |
+| 对话框页面 | `SettingsActivity` / `LogActivity` / `PreviewActivity` / `AnimPreviewActivity` |
+
+### 体验/性能
+- 列表：`browse` 时一次性读元数据进 `FileEntry`，`onBind` 只做绑定 → 去掉每行 3 次 `stat` 与 `new SimpleDateFormat`
+- 设置/日志/纹理预览/动画预览 → 独立页面；动画预览画布不再用 `weight=1` 的 0 高视图
+- 抽屉改真 `DrawerLayout`（有遮罩、边缘手势、返回键收起）
+- 多选：单点勾选（自管选中集合 + `activated` 背景），工具栏随模式切换菜单
+- 编辑器：元素列表 RecyclerView + ViewHolder；播放期间不重建列表；新增双指缩放；拖动纳入撤销
+- 进度：页内 `LinearProgressIndicator` + 可取消对话框（替代已废弃的 ProgressDialog）
+- 预览：`ZoomImageView` 支持双指缩放 / 拖动 / 双击复位
+
+### 健壮性
+- 解析器（build.bin/anim.bin）所有读取都做边界校验，伪造/半截文件不再 OOM/越界
+- 动画资产改为按路径现加载，不再依赖 `static` 字段（进程回收后不会白屏）
+- `native` 库加载失败时禁用转换入口（而不是点到崩）
+- 删除 `build_apk.sh`（被 Gradle/CMake 取代）
+
+## 验证状态
+- CI（GitHub Actions）**编译通过**：`:app:assembleRelease` 产出签名 APK（5.6 MB，versionCode 7 / 2.0）
+- 期间修掉 3 个 CI 才能暴露的问题：
+  1. `Widget.DstTex.Badge` 缺 `parent=""` → AAPT 推断出不存在的 `Widget.DstTex`
+  2. `HorizontalScrollView` 用了不存在的 `android:horizontalScrollBarEnabled`
+  3. `setup-gradle@v4` 不再接受 `arguments` 参数
+- **未做运行时验证**（本机无法安装/运行）。回归重点：
+  1. 首启权限流程 + 抽屉 + 面包屑 + 返回键分层退出
+  2. 长目录滚动流畅度、长按进入多选后单点勾选/取消
+  3. 单张与整目录批量转换（SKIP/FAIL 分列、进度可取消、`.bak` 生成）
+  4. `.tex` 预览缩放、`.zip` 动画预览、编辑器拖动→撤销→保存写回
+  5. 深色模式下各页面可读性（含编辑器深色画布）
+
+## 仍未做
+- mip 编码改 TGA 中转 / 低质量档；zip 内 `.tex` 用 `NO_COMPRESSION`
+- 列表分页/虚拟化极端目录（万级文件）压力验证
+- 单元测试（`core/` 已经是纯逻辑，最适合补 JUnit）
+- 编辑器增删帧、替换图集、多动画同时编辑
