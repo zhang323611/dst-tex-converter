@@ -1,6 +1,15 @@
-# 构建产物
+# Gradle
+.gradle/
 build/
+local.properties
+*.iml
+.idea/
+.vscode/
+*.hprof
+
+# 构建产物
 *.apk
+*.aab
 *.so
 
 # 签名密钥（切勿提交）
@@ -11,8 +20,3 @@ build/
 *.tar
 *.tar.gz
 *.zip
-
-# IDE
-.idea/
-*.iml
-.vscode/

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 品牌色 -->
+    <color name="brand_primary">#2B6CB0</color>
+    <color name="brand_primary_dark">#1F4E82</color>
+    <color name="brand_secondary">#4A90D9</color>
+
+    <!-- 文件类型徽标（深浅色通用，饱和度已保证在白/黑底都可辨） -->
+    <color name="badge_dir">#4A90D9</color>
+    <color name="badge_tex">#E8833A</color>
+    <color name="badge_png">#34A853</color>
+    <color name="badge_zip">#9B59B6</color>
+    <color name="badge_file">#95A1AD</color>
+
+    <!-- 编辑器（深色画布） -->
+    <color name="editor_bg">#1B1B1B</color>
+    <color name="editor_panel">#262626</color>
+    <color name="editor_grid">#353535</color>
+    <color name="editor_axis_x">#E05252</color>
+    <color name="editor_axis_y">#52C452</color>
+    <color name="editor_selection">#FFCC33</color>
+    <color name="editor_caption">#AAAAAA</color>
+    <color name="canvas_bg">#303030</color>
+
+    <color name="scrim">#88000000</color>
+    <color name="divider">#EBEEF2</color>
+    <color name="row_selected">#DCEAFB</color>
+</resources>

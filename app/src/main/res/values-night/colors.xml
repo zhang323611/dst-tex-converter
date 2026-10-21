@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="divider">#2E2E2E</color>
+    <color name="row_selected">#1E3A5F</color>
+    <color name="badge_file">#7C8894</color>
+    <color name="brand_primary">#3D7FC4</color>
+    <color name="brand_primary_dark">#17212B</color>
+</resources>

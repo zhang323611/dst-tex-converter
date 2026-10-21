@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">饥荒纹理转换</string>
+
+    <!-- 通用 -->
+    <string name="ok">确定</string>
+    <string name="cancel">取消</string>
+    <string name="close">关闭</string>
+    <string name="delete">删除</string>
+    <string name="rename">重命名</string>
+    <string name="convert">转换</string>
+    <string name="exit">退出</string>
+    <string name="select_all">全选</string>
+    <string name="invert_all">反选</string>
+    <string name="search">搜索</string>
+    <string name="settings">设置</string>
+    <string name="about">关于</string>
+    <string name="bookmarks">书签</string>
+    <string name="loading">正在载入…</string>
+
+    <!-- 标题 -->
+    <string name="title_settings">转换设置</string>
+    <string name="title_log">运行日志</string>
+    <string name="title_preview">纹理预览</string>
+    <string name="title_anim_preview">动画预览</string>
+    <string name="title_anim_editor">动画编辑</string>
+    <string name="title_select_dir">选择目录</string>
+
+    <!-- 首页 -->
+    <string name="drawer_open">打开导航</string>
+    <string name="nav_home">主目录</string>
+    <string name="nav_downloads">下载目录</string>
+    <string name="nav_bookmarks">书签</string>
+    <string name="nav_search">搜索文件</string>
+    <string name="nav_add_bookmark">把当前目录加为书签</string>
+    <string name="nav_settings">转换设置</string>
+    <string name="nav_log">查看日志</string>
+    <string name="nav_about">关于</string>
+    <string name="nav_pick_dir">选择目录</string>
+    <string name="up_one_level">上一级</string>
+    <string name="selected_count">已选 %1$d 项</string>
+    <string name="status_fmt">方式 %1$s  %2$s/%3$s   共 %4$d 项   %5$s 线程   输出到源目录</string>
+    <string name="status_auto">自动</string>
+    <string name="folder">文件夹</string>
+    <string name="folder_n_items">文件夹 · %1$d 项</string>
+
+    <!-- 转换 -->
+    <string name="converting">转换中</string>
+    <string name="converting_n">转换中（%1$d 线程）</string>
+    <string name="preparing">准备中…</string>
+    <string name="convert_done">转换完成</string>
+    <string name="convert_cancelled">已取消</string>
+    <string name="result_summary">成功 %1$d，跳过 %2$d，失败 %3$d</string>
+    <string name="backup_on_note">（已替换原文件，备份 .bak）</string>
+    <string name="backup_off_note">（已替换原文件，未备份 —— 设置里可开启 .bak）</string>
+    <string name="result_truncated">… 其余 %1$d 条见「查看日志」</string>
+
+    <!-- 设置 -->
+    <string name="pref_convert_mode">转换方式</string>
+    <string name="pref_quality">压缩质量</string>
+    <string name="pref_backup">自动备份 .bak（转换前备份原文件，默认开启）</string>
+    <string name="pref_nested">处理压缩包内的压缩包（内层 tex 一并转换，逐层递归）</string>
+    <string name="pref_debug">调试模式（预览画布叠加诊断信息）</string>
+    <string name="pref_threads">并发线程数</string>
+    <string name="pref_block_info">ASTC 块大小：8x8（手机版标准，2bpp）\nKTEX 头不携带块尺寸信息，其它块尺寸会产出与本工具/游戏都不兼容的纹理，故不提供该选项。</string>
+    <string name="mode_auto">自动检测（推荐）</string>
+    <string name="mode_png2tex">PNG → TEX(ASTC)</string>
+    <string name="mode_tex2png">TEX → PNG</string>
+    <string name="mode_dxt2astc">TEX(DXT/RGBA) → TEX(ASTC)</string>
+    <string name="quality_fast">fast — 最快</string>
+    <string name="quality_medium">medium — 推荐</string>
+    <string name="quality_thorough">thorough — 较慢</string>
+    <string name="quality_exhaustive">exhaustive — 极慢</string>
+    <string name="threads_single">1 — 单线程（兼容）</string>
+    <string name="threads_2">2 — 双线程</string>
+    <string name="threads_4">4 — 四线程</string>
+    <string name="threads_8">8 — 八线程</string>
+    <string name="threads_auto">自动 — 检测 %1$d 核</string>
+
+    <!-- 日志 -->
+    <string name="log_copy">复制</string>
+    <string name="log_share">分享</string>
+    <string name="log_clear">清空</string>
+    <string name="log_empty">暂无日志</string>
+
+    <!-- 动画 -->
+    <string name="anim_play">播放</string>
+    <string name="anim_pause">暂停</string>
+    <string name="anim_preview">预览动画</string>
+    <string name="anim_edit">编辑动画</string>
+    <string name="anim_flip_uv">翻转UV</string>
+    <string name="anim_zorder">层序</string>
+    <string name="anim_reset">复位</string>
+    <string name="anim_import">导入</string>
+    <string name="anim_save">保存</string>
+    <string name="anim_undo">撤销</string>
+    <string name="anim_elements">元素</string>
+    <string name="anim_no_data">无动画数据</string>
+</resources>

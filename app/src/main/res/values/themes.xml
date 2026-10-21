@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <style name="Theme.DstTex" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand_primary</item>
+        <item name="colorPrimaryVariant">@color/brand_primary_dark</item>
+        <item name="colorSecondary">@color/brand_secondary</item>
+        <item name="android:statusBarColor">@color/brand_primary_dark</item>
+        <item name="android:navigationBarColor">?attr/colorSurface</item>
+        <item name="android:windowBackground">?attr/colorSurface</item>
+    </style>
+
+    <!-- 深色画布专用（编辑器 / 动画预览），不跟随系统深色 -->
+    <style name="Theme.DstTex.Editor" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/brand_primary</item>
+        <item name="colorPrimaryVariant">@color/brand_primary_dark</item>
+        <item name="colorSecondary">@color/brand_secondary</item>
+        <item name="android:statusBarColor">@color/editor_panel</item>
+        <item name="android:navigationBarColor">@color/editor_panel</item>
+        <item name="android:windowBackground">@color/editor_bg</item>
+    </style>
+
+    <!-- 行标题 / 副标题 -->
+    <style name="TextAppearance.DstTex.RowTitle" parent="TextAppearance.MaterialComponents.Body1">
+        <item name="android:textSize">@dimen/text_row_title</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <style name="TextAppearance.DstTex.RowSub" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="android:textSize">@dimen/text_row_sub</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <!-- 文件类型徽标：圆角方块 + 字母 -->
+    <style name="Widget.DstTex.Badge">
+        <item name="android:layout_width">@dimen/badge_size</item>
+        <item name="android:layout_height">@dimen/badge_size</item>
+        <item name="android:gravity">center</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:textColor">#FFFFFFFF</item>
+        <item name="android:background">@drawable/bg_badge</item>
+    </style>
+
+    <style name="Widget.DstTex.Toolbar" parent="Widget.MaterialComponents.Toolbar.Primary">
+        <item name="android:minHeight">?attr/actionBarSize</item>
+        <item name="titleTextColor">#FFFFFFFF</item>
+        <item name="navigationIconTint">#FFFFFFFF</item>
+    </style>
+
+    <style name="Widget.DstTex.Button.Text" parent="Widget.MaterialComponents.Button.TextButton">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">@dimen/touch_min</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+</resources>

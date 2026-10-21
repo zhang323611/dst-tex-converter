@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:theme="@style/Theme.DstTex.Editor"
+    android:orientation="vertical"
+    android:background="@color/editor_bg">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        style="@style/Widget.DstTex.Toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        app:navigationIcon="@drawable/ic_back"
+        app:title="@string/title_anim_preview" />
+
+    <TextView
+        android:id="@+id/info"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/editor_panel"
+        android:paddingStart="@dimen/space_m"
+        android:paddingTop="@dimen/space_xs"
+        android:paddingEnd="@dimen/space_m"
+        android:paddingBottom="@dimen/space_xs"
+        android:textColor="@color/editor_caption"
+        android:textSize="@dimen/text_caption" />
+
+    <com.dsttex.ui.AnimRendererView
+        android:id="@+id/canvas"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <SeekBar
+        android:id="@+id/frameBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/editor_panel"
+        android:orientation="horizontal"
+        android:padding="@dimen/space_xs">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnUv"
+            style="@style/Widget.DstTex.Button.Text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/anim_flip_uv"
+            android:textColor="#FFFFFFFF" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnDir"
+            style="@style/Widget.DstTex.Button.Text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFFFF" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnZ"
+            style="@style/Widget.DstTex.Button.Text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/anim_zorder"
+            android:textColor="#FFFFFFFF" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnEdit"
+            style="@style/Widget.DstTex.Button.Text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/anim_edit"
+            android:textColor="#FFFFFFFF" />
+    </LinearLayout>
+</LinearLayout>

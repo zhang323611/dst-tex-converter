@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="space_xs">4dp</dimen>
+    <dimen name="space_s">8dp</dimen>
+    <dimen name="space_m">12dp</dimen>
+    <dimen name="space_l">16dp</dimen>
+    <dimen name="space_xl">24dp</dimen>
+
+    <!-- 触控目标下限（Material 建议 48dp） -->
+    <dimen name="touch_min">48dp</dimen>
+
+    <dimen name="row_height">64dp</dimen>
+    <dimen name="badge_size">40dp</dimen>
+    <dimen name="badge_radius">10dp</dimen>
+    <dimen name="breadcrumb_height">44dp</dimen>
+    <dimen name="divider">1dp</dimen>
+
+    <dimen name="text_row_title">15sp</dimen>
+    <dimen name="text_row_sub">12sp</dimen>
+    <dimen name="text_body">14sp</dimen>
+    <dimen name="text_caption">12sp</dimen>
+    <dimen name="text_mono">11sp</dimen>
+</resources>

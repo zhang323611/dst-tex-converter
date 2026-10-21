@@ -1,0 +1,92 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.dsttex'
+    compileSdk 34
+    // 与 CI/本地保持一致的 NDK（build.gradle 里 pin 住，避免 AGP 自行下载别的版本）
+    ndkVersion System.getenv('DSTTEX_NDK') ?: '27.3.13750724'
+
+    defaultConfig {
+        applicationId "com.dsttex"
+        minSdk 24                 // native 按 API 24 编译（aarch64-linux-android24）
+        targetSdk 29              // 保持 29：MANAGE_EXTERNAL_STORAGE + 直接路径访问全部文件
+        versionCode 7
+        versionName "2.0"
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static'
+                cppFlags '-O2'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+
+    // native 库走 useLegacyPackaging：压缩后安装时解压，避免页对齐/未压缩的额外要求
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    signingConfigs {
+        release {
+            // 密钥固定在仓库外，避免每次构建换签名导致无法覆盖升级
+            def ksPath = System.getenv("DSTTEX_KEYSTORE") ?: "${System.getProperty('user.home')}/.dsttex/dsttex.jks"
+            def ksFile = new File(ksPath)
+            if (ksFile.exists()) {
+                storeFile ksFile
+                storePassword System.getenv("DSTTEX_KS_PASS") ?: "123456"
+                keyAlias System.getenv("DSTTEX_KS_ALIAS") ?: "dsttex"
+                keyPassword System.getenv("DSTTEX_KS_PASS") ?: "123456"
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            def ksPath = System.getenv("DSTTEX_KEYSTORE") ?: "${System.getProperty('user.home')}/.dsttex/dsttex.jks"
+            if (new File(ksPath).exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    implementation 'androidx.drawerlayout:drawerlayout:1.2.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'com.google.android.material:material:1.12.0'
+}

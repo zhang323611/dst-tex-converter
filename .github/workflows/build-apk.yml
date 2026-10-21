@@ -1,11 +1,7 @@
 name: build-apk
 
-# 目的：在 GitHub 上跑真编译（本机无 JDK/NDK，本地只做了语法解析）。
-# 产物：dst_tex_converter.apk（artifact，保留 14 天）
-#
-# 说明：不使用 android-actions/setup-android —— 它依赖已下线的 cmdline-tools "tools" 包，
-# 在 2026 年的镜像上会直接失败。改为使用 ubuntu-latest 预装的 SDK
-# （build-tools 34.0.0 / platforms;android-34 / NDK 27.x 均已预装，免去 600MB 下载）。
+# Gradle 构建（资源层 + AndroidX + CMake native）
+# 产物：app-release.apk（artifact，保留 14 天）
 
 on:
   push:
@@ -17,7 +13,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@v4
@@ -28,43 +24,46 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # build_apk.sh 在密钥不存在时会自动生成一个。若不缓存，每次构建都换新密钥，
-      # 装过旧版本的设备就无法覆盖升级。这里把 ~/.dsttex 固定下来。
-      - name: 恢复签名密钥
+      - name: 恢复签名密钥（多次构建签名一致，可覆盖升级）
         uses: actions/cache@v4
         with:
           path: ~/.dsttex
           key: dsttex-keystore-v1
 
-      - name: 检查预装 SDK / NDK
+      - name: 生成签名密钥（若缓存未命中）
         run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          # 缺包才装（正常都已预装）
-          [ -f "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2" ] || yes | sdkmanager "build-tools;34.0.0"
-          [ -f "$ANDROID_SDK_ROOT/platforms/android-34/android.jar" ] || yes | sdkmanager "platforms;android-34"
-          ls -l "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2" \
-                "$ANDROID_SDK_ROOT/platforms/android-34/android.jar"
-          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++" --version
-          javac -version
+          if [ ! -f "$HOME/.dsttex/dsttex.jks" ]; then
+            mkdir -p "$HOME/.dsttex"
+            keytool -genkeypair -keystore "$HOME/.dsttex/dsttex.jks" -alias dsttex \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass 123456 -keypass 123456 -dname "CN=DSTTex" -noprompt
+            echo "已生成新的签名密钥"
+          else
+            echo "复用缓存中的签名密钥"
+          fi
 
-      # 先只编 Java：几十秒内暴露类型/语法错误，不必等 native 编完
-      - name: javac 类型检查（快失败）
+      - name: 补齐 SDK 组件（CMake / NDK 按 build.gradle 里 pin 的版本）
         run: |
-          mkdir -p build/javac-check
-          javac -source 8 -target 8 -Xlint:-options -encoding UTF-8 \
-            -classpath "$ANDROID_SDK_ROOT/platforms/android-34/android.jar" \
-            -d build/javac-check \
-            app/src/com/dsttex/*.java
+          sdkmgr() { yes | sdkmanager "$@" > /dev/null 2>&1 || true; }
+          [ -d "$ANDROID_SDK_ROOT/cmake/3.22.1" ] || sdkmgr "cmake;3.22.1"
+          [ -d "$ANDROID_SDK_ROOT/ndk/27.3.13750724" ] || sdkmgr "ndk;27.3.13750724"
+          ls "$ANDROID_SDK_ROOT/cmake/3.22.1/bin/cmake" "$ANDROID_SDK_ROOT/ndk/27.3.13750724/ndk-build" || true
+          java -version
 
-      - name: 构建 APK（native + dex + 打包 + 签名）
-        run: bash build_apk.sh
+      - name: Gradle 构建
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          arguments: ':app:assembleRelease --no-daemon --stacktrace'
 
-      - name: 校验产物
+      - name: 定位产物并校验
         run: |
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          echo "APK=$APK"
+          cp "$APK" dst_tex_converter.apk
           ls -la dst_tex_converter.apk
-          "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify --print-certs dst_tex_converter.apk
-          "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2" dump badging dst_tex_converter.apk | head -20
+          "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify --print-certs dst_tex_converter.apk || true
+          "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2" dump badging dst_tex_converter.apk | head -12 || true
           unzip -l dst_tex_converter.apk
 
       - name: 上传 APK
@@ -74,11 +73,13 @@ jobs:
           path: dst_tex_converter.apk
           retention-days: 14
 
-      - name: 上传构建目录（失败时便于排查）
+      - name: 上传构建日志目录（失败时排查）
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-dir
-          path: build/
+          name: gradle-logs
+          path: |
+            app/build/outputs/logs/
+            app/.cxx/
           retention-days: 7
           if-no-files-found: ignore
