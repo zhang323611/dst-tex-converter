@@ -43,7 +43,7 @@
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="1"
-                android:horizontalScrollBarEnabled="false">
+                android:scrollbars="none">
 
                 <LinearLayout
                     android:id="@+id/crumbBar"
