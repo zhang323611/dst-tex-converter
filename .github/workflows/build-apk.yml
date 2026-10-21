@@ -50,11 +50,13 @@ jobs:
           ls "$ANDROID_SDK_ROOT/cmake/3.22.1/bin/cmake" "$ANDROID_SDK_ROOT/ndk/27.3.13750724/ndk-build" || true
           java -version
 
-      - name: Gradle 构建
+      - name: 安装 Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-          arguments: ':app:assembleRelease --no-daemon --stacktrace'
+
+      - name: 构建 release APK
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
 
       - name: 定位产物并校验
         run: |
