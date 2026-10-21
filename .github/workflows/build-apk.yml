@@ -1,0 +1,76 @@
+name: build-apk
+
+# 目的：在 GitHub 上跑真编译（本机无 JDK/NDK，本地只做了语法解析）。
+# 产物：dst_tex_converter.apk（artifact，保留 14 天）
+
+on:
+  push:
+    branches: [ rebuild ]
+  pull_request:
+    branches: [ rebuild ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Android SDK 工具
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 SDK 组件（platform 34 / build-tools 34.0.0 / NDK r26）
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          if ! sdkmanager "ndk;26.3.11579264" > /dev/null 2>&1; then
+            NV=$(sdkmanager --list 2>/dev/null | grep -oE 'ndk;26\.[0-9.]+' | sort -u | tail -1)
+            echo "pin 的 NDK 版本不可用，回退到 $NV"
+            sdkmanager "$NV"
+          fi
+          NDK_DIR=$(ls -d "$ANDROID_SDK_ROOT/ndk/"* | sort -V | tail -1)
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "使用的 NDK: $NDK_DIR"
+          ls "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2"
+
+      # 先只编 Java：几十秒内暴露类型/语法错误，不必等 native 编完
+      - name: javac 类型检查（快失败）
+        run: |
+          mkdir -p build/javac-check
+          javac -source 8 -target 8 -Xlint:-options -encoding UTF-8 \
+            -classpath "$ANDROID_SDK_ROOT/platforms/android-34/android.jar" \
+            -d build/javac-check \
+            app/src/com/dsttex/*.java
+
+      - name: 构建 APK（native + dex + 打包 + 签名）
+        run: bash build_apk.sh
+
+      - name: 校验产物
+        run: |
+          ls -la dst_tex_converter.apk
+          "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify --print-certs dst_tex_converter.apk
+          unzip -l dst_tex_converter.apk
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dst_tex_converter-apk
+          path: dst_tex_converter.apk
+          retention-days: 14
+
+      - name: 上传构建目录（失败时便于排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-dir
+          path: build/
+          retention-days: 7
+          if-no-files-found: ignore
