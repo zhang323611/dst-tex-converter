@@ -1,19 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dsttex"
-    android:versionCode="5"
-    android:versionName="1.4">
+    android:versionCode="6"
+    android:versionName="1.5">
 
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
-    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="29" />
+    <!-- native 库按 API 24 编译（aarch64-linux-android24-clang++），minSdk 必须与之一致，
+         否则 API 21~23 设备上 System.loadLibrary 会失败。 -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="29" />
 
     <application
         android:label="饥荒纹理转换"
         android:allowBackup="true"
         android:requestLegacyExternalStorage="true"
+        android:extractNativeLibs="true"
+        android:largeHeap="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity

@@ -57,10 +57,15 @@ public class TexConverter extends Activity {
     private boolean engineReady = false;
     private final List<File> entries = new ArrayList<>();
     private boolean multiSelect = false;
-    private String blockSize = "8x8";
+    // DST 手游 .tex 的 comp=24 语义就是「ASTC 8x8」，KTEX 头不携带块尺寸信息。
+    // 之前设置里提供了 4x4/6x6/10x10/12x12 五档，但 writeAstcHeader() 与 pitch/datasz
+    // 全部按 8x8 写死 —— 选非 8x8 会产出「头部声称 8x8、数据是别的块尺寸」的废纹理，
+    // 连本应用自己都读不回来。故收敛为唯一值，不再暴露无效选项。
+    private static final String ASTC_BLOCK = "8x8";
     private String quality = "medium";
     private String convertMode = "auto"; // auto / png2tex / tex2png / dxt2astc
-    private boolean autoBackup = false; // 自动备份 .bak，默认关闭
+    // 转换是原地替换，没有备份就没有后悔药 —— 默认开启
+    private boolean autoBackup = true;
     private SharedPreferences prefs;
     private String highlightName = null; // 搜索跳转后高亮的文件名
 
@@ -89,6 +94,7 @@ public class TexConverter extends Activity {
 
     // ---------- 运行日志(便于排查转换失败) ----------
     private static final int LOG_MAX = 500;
+    private static final long LOG_FILE_MAX = 2L * 1024 * 1024;   // 落盘日志上限 2MB
     private static final java.util.ArrayDeque<String> LOG = new java.util.ArrayDeque<>();
     private static File logFile;
 
@@ -100,6 +106,8 @@ public class TexConverter extends Activity {
         while (LOG.size() > LOG_MAX) LOG.removeFirst();
         if (logFile != null) {
             try {
+                // 防止日志在 cacheDir 里无限增长(批量转换会写几千行)
+                if (logFile.length() > LOG_FILE_MAX) logFile.delete();
                 java.io.FileWriter w = new java.io.FileWriter(logFile, true);
                 w.write(line + "\n");
                 w.close();
@@ -143,10 +151,13 @@ public class TexConverter extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("texconv", MODE_PRIVATE);
-        autoBackup = prefs.getBoolean("autoBackup", false);
+        autoBackup = prefs.getBoolean("autoBackup", true);
         threadCount = prefs.getInt("threadCount", 1);
         debugMode = prefs.getBoolean("debugMode", false);
         nestedZip = prefs.getBoolean("nestedZip", true);
+        // 之前这三项只改内存字段、从不落盘，重启后静默回到默认值
+        convertMode = prefs.getString("convertMode", "auto");
+        quality = prefs.getString("quality", "medium");
         logFile = new File(getCacheDir(), "dsh_tex.log");
         log("==== 启动 v1.4  threadCount=" + threadCount + " mode=" + convertMode
             + " nestedZip=" + nestedZip + " backup=" + autoBackup + " ====");
@@ -248,9 +259,18 @@ public class TexConverter extends Activity {
             new AlertDialog.Builder(this)
                 .setTitle("需要存储权限")
                 .setMessage("为浏览全部文件，请授予「所有文件访问」权限")
-                .setPositiveButton("去授权", (d, w) -> startActivity(
-                    new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                        Uri.parse("package:" + getPackageName()))))
+                .setPositiveButton("去授权", (d, w) -> {
+                    try {
+                        startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:" + getPackageName())));
+                    } catch (Exception e) {
+                        // 部分 ROM 没有这个 Activity，退化到应用详情页
+                        try {
+                            startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:" + getPackageName())));
+                        } catch (Exception e2) { toast("无法打开设置页，请手动授予存储权限"); }
+                    }
+                })
                 .setNegativeButton("取消", null).show();
         }
 
@@ -372,6 +392,7 @@ public class TexConverter extends Activity {
     }
 
     // 并发批量转换任务(每个任务使用独立临时目录避免冲突)
+    // 返回 "OK" / "SKIP" / null(失败)，供调用方分别计数
     private String runConvertTaskMT(final File input, final File outputDir,
             final java.util.List<String> results) {
         final String tid = String.valueOf(Thread.currentThread().getId());
@@ -379,15 +400,16 @@ public class TexConverter extends Activity {
             File dir = tempWorkingDir(tid);
             try {
                 String r = convertFile(input, outputDir, dir);
-                synchronized(results) { results.add("OK  " + input.getName() + " -> " + r); }
-                return r;
+                synchronized (results) { results.add("OK   " + input.getName() + " -> " + r); }
+                return "OK";
             } finally {
-                File[] tfs = dir.listFiles();
-                if (tfs != null) for (File c : tfs) c.delete();
-                dir.delete();
+                purgeDir(dir);
             }
+        } catch (SkipException se) {
+            synchronized (results) { results.add("SKIP " + input.getName() + ": " + se.getMessage()); }
+            return "SKIP";
         } catch (Exception e) {
-            synchronized(results) {
+            synchronized (results) {
                 results.add("FAIL " + input.getName() + ": " + e.getMessage());
                 logErr("转换 " + input.getName(), e);
             }
@@ -402,15 +424,13 @@ public class TexConverter extends Activity {
             File dir = tempWorkingDir("zip_" + tid);
             try {
                 String r = convertZipReplace(zip, dir);
-                synchronized(results) { results.add("OK  " + zip.getName() + " -> " + r); }
-                return r;
+                synchronized (results) { results.add("OK   " + zip.getName() + " -> " + r); }
+                return "OK";
             } finally {
-                File[] zs = dir.listFiles();
-                if (zs != null) for (File c : zs) c.delete();
-                dir.delete();
+                purgeDir(dir);
             }
         } catch (Exception e) {
-            synchronized(results) {
+            synchronized (results) {
                 results.add("FAIL " + zip.getName() + ": " + e.getMessage());
                 logErr("转换 " + zip.getName(), e);
             }
@@ -557,8 +577,6 @@ public class TexConverter extends Activity {
     private void showSettings() {
         final String[] modeVals = {"auto", "png2tex", "tex2png", "dxt2astc"};
         final String[] modeLabels = {"自动检测（推荐）", "PNG → TEX(ASTC)", "TEX → PNG", "TEX(DXT/RGBA) → TEX(ASTC)"};
-        final String[] sizeVals = {"4x4", "6x6", "8x8", "10x10", "12x12"};
-        final String[] sizeLabels = {"4x4 — 高质量 8bpp", "6x6 — 均衡 3.6bpp", "8x8 — 手机版标准 2bpp", "10x10 — 1.28bpp", "12x12 — 0.89bpp"};
         final String[] qualVals = {"fast", "medium", "thorough", "exhaustive"};
         final String[] qualLabels = {"fast — 最快", "medium — 推荐", "thorough — 较慢", "exhaustive — 极慢"};
 
@@ -582,21 +600,13 @@ public class TexConverter extends Activity {
         }
         panel.addView(rgMode);
 
-        // 块大小
+        // 块大小（固定 8x8：KTEX 头不携带块尺寸，其它档位会产出废纹理，故不给选项）
         TextView t1 = new TextView(this);
-        t1.setText("ASTC 块大小（决定压缩率/体积）");
-        t1.setTextSize(14);
+        t1.setText("ASTC 块大小：" + ASTC_BLOCK + "（手机版标准，2bpp；KTEX 格式不支持其它块尺寸）");
+        t1.setTextSize(13);
+        t1.setTextColor(C_TEXT_SUB);
         t1.setPadding(0, 12, 0, 0);
         panel.addView(t1);
-        final RadioGroup rgSize = new RadioGroup(this);
-        for (int i = 0; i < sizeVals.length; i++) {
-            RadioButton rb = new RadioButton(this);
-            rb.setText(sizeLabels[i]);
-            rb.setId(i);
-            if (sizeVals[i].equals(blockSize)) rb.setChecked(true);
-            rgSize.addView(rb);
-        }
-        panel.addView(rgSize);
 
         // 质量
         TextView t2 = new TextView(this);
@@ -616,7 +626,7 @@ public class TexConverter extends Activity {
 
         // 自动备份 .bak
         final CheckBox cbBackup = new CheckBox(this);
-        cbBackup.setText("自动备份 .bak（转换前备份原文件，默认关闭）");
+        cbBackup.setText("自动备份 .bak（转换前备份原文件，默认开启）");
         cbBackup.setChecked(autoBackup);
         cbBackup.setPadding(0, 12, 0, 0);
         panel.addView(cbBackup);
@@ -667,17 +677,20 @@ public class TexConverter extends Activity {
             .setView(sv)
             .setPositiveButton("确定", (d, w) -> {
                 int m = rgMode.getCheckedRadioButtonId();
-                int s = rgSize.getCheckedRadioButtonId();
                 int q = rgQual.getCheckedRadioButtonId();
                 if (m >= 0 && m < modeVals.length) convertMode = modeVals[m];
-                if (s >= 0 && s < sizeVals.length) blockSize = sizeVals[s];
                 if (q >= 0 && q < qualVals.length) quality = qualVals[q];
                 autoBackup = cbBackup.isChecked();
-                prefs.edit().putBoolean("autoBackup", autoBackup).apply();
                 debugMode = cbDebug.isChecked();
                 nestedZip = cbNested.isChecked();
-                prefs.edit().putBoolean("nestedZip", nestedZip).apply();
-                prefs.edit().putBoolean("debugMode", debugMode).apply();
+                // 一次性提交，避免 5 次 apply 各自触发监听
+                prefs.edit()
+                     .putString("convertMode", convertMode)
+                     .putString("quality", quality)
+                     .putBoolean("autoBackup", autoBackup)
+                     .putBoolean("nestedZip", nestedZip)
+                     .putBoolean("debugMode", debugMode)
+                     .apply();
                 try {
                     int sel = rgThreads.getCheckedRadioButtonId();
                     threadCount = Integer.parseInt(threadVals[sel]);
@@ -947,7 +960,7 @@ public class TexConverter extends Activity {
 
     private void updateStatus() {
         String tc = threadCount < 0 ? "auto" : String.valueOf(threadCount);
-        statusView.setText("方式 " + modeLabel() + "  " + blockSize + "/" + quality
+        statusView.setText("方式 " + modeLabel() + "  " + ASTC_BLOCK + "/" + quality
             + "   共 " + entries.size() + " 项   " + tc + " 线程   输出到源目录");
     }
 
@@ -1083,14 +1096,17 @@ public class TexConverter extends Activity {
                 final java.util.List<String> items = new ArrayList<>();
                 long total = 0;
                 ZipFile zf = new ZipFile(zip);
-                java.util.Enumeration<? extends ZipEntry> en = zf.entries();
-                while (en.hasMoreElements()) {
-                    ZipEntry ze = en.nextElement();
-                    if (ze.isDirectory()) continue;
-                    items.add(ze.getName() + "    " + humanSize(ze.getSize()));
-                    total += ze.getSize();
+                try {
+                    java.util.Enumeration<? extends ZipEntry> en = zf.entries();
+                    while (en.hasMoreElements()) {
+                        ZipEntry ze = en.nextElement();
+                        if (ze.isDirectory()) continue;
+                        items.add(ze.getName() + "    " + humanSize(ze.getSize()));
+                        total += Math.max(0, ze.getSize());
+                    }
+                } finally {
+                    zf.close();
                 }
-                zf.close();
                 final long tot = total;
                 runOnUiThread(() -> {
                     if (items.isEmpty()) { toast("zip 内无文件"); return; }
@@ -1099,7 +1115,11 @@ public class TexConverter extends Activity {
                         .setItems(items.toArray(new String[0]), null)
                         .setPositiveButton("导出 zip", (d, w) -> {
                             try {
-                                File outZip = new File(dyn.getParentFile(), baseName(dyn) + ".zip");
+                                // 不要直接写 baseName+".zip": DST 模组里 xxx.dyn 与 xxx.zip 往往同时存在,
+                                // 直接覆盖会毁掉真实文件
+                                File outZip = new File(dyn.getParentFile(), baseName(dyn) + "_decoded.zip");
+                                for (int i = 2; outZip.exists() && i < 100; i++)
+                                    outZip = new File(dyn.getParentFile(), baseName(dyn) + "_decoded_" + i + ".zip");
                                 copyFile(zip, outZip);
                                 toast("已导出: " + outZip.getName());
                             } catch (Exception e) { toast("导出失败: " + e.getMessage()); }
@@ -1107,7 +1127,9 @@ public class TexConverter extends Activity {
                         .setNeutralButton("重新加密", (d, w) -> {
                             try {
                                 File outDyn = new File(dyn.getParentFile(), baseName(dyn) + "_re.dyn");
-                                writeFile(outDyn, dynEncrypt(dec));
+                                for (int i = 2; outDyn.exists() && i < 100; i++)
+                                    outDyn = new File(dyn.getParentFile(), baseName(dyn) + "_re_" + i + ".dyn");
+                                writeFileAtomic(outDyn, dynEncrypt(dec));
                                 toast("已写出: " + outDyn.getName());
                             } catch (Exception e) { toast("加密失败: " + e.getMessage()); }
                         })
@@ -1426,11 +1448,14 @@ public class TexConverter extends Activity {
     static AnimFile sAnim;
     static Bitmap sAtlas;
     static byte[] sAnimBytes;
-    static File sAnimZip;
+    static File sAnimZip;      // 当前正在编辑的 zip（"导入"路径下这是 cacheDir 里的副本）
+    static File sAnimSrc;      // 用户的原文件；为 null 表示导入自 SAF、拿不到真实路径
 
     // 跳到独立编辑界面(横屏)
     private void launchAnimEditor(File zip, BuildFile build, AnimFile anim, Bitmap atlas, byte[] animBytes) {
-        sBuild = build; sAnim = anim; sAtlas = atlas; sAnimBytes = animBytes; sAnimZip = zip;
+        sBuild = build; sAnim = anim; sAtlas = atlas; sAnimBytes = animBytes;
+        sAnimZip = zip;
+        sAnimSrc = zip;                 // 从文件浏览器打开时, zip 就是用户的真实文件
         startActivity(new Intent(this, AnimEditor.class));
     }
 
@@ -1736,6 +1761,8 @@ public class TexConverter extends Activity {
     }
 
     // ---------- 批量转换 ----------
+    private static final int RESULT_LINES_MAX = 40;   // 结果框最多列多少条(其余指向日志)
+
     private void convertSelected() {
         if (!engineReady) { toast("引擎未就绪"); return; }
         final java.util.List<File> texFiles = new java.util.ArrayList<>();
@@ -1752,174 +1779,228 @@ public class TexConverter extends Activity {
         exitMultiSelect();
 
         final int N = activeThreadCount();
+        final boolean[] cancelled = {false};
 
         final ProgressDialog pd = new ProgressDialog(this);
         pd.setTitle(N > 1 ? "转换中 (" + N + " 线程)" : "转换中");
         pd.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
         pd.setMax(total);
-        pd.setCancelable(false);
+        pd.setCancelable(true);              // 大包/exhaustive 可能跑很久，必须能取消
         pd.setCanceledOnTouchOutside(false);
+        pd.setOnCancelListener(d -> cancelled[0] = true);
         pd.setMessage("准备中...");
         pd.show();
 
         new Thread(() -> {
-            final java.util.List<String> results = new java.util.ArrayList<>();
-            int ok = 0, fail = 0;
+            final java.util.List<String> results =
+                    java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+            int ok = 0, fail = 0, skip = 0;
+            final long[] lastUpd = {0};
 
-            if (N <= 1) {
-                // ---------- 单线程路径(兼容旧行为) ----------
-                int done = 0;
-                for (File f : texFiles) {
-                    try {
+            try {
+                if (N <= 1) {
+                    // ---------- 单线程路径 ----------
+                    int done = 0;
+                    for (File f : texFiles) {
+                        if (cancelled[0]) break;
                         File tmpDir = tempWorkingDir("st_" + done);
                         try {
                             String r = convertFile(f, f.getParentFile(), tmpDir);
-                            ok++; results.add("OK  " + f.getName() + " -> " + r);
+                            ok++; results.add("OK   " + f.getName() + " -> " + r);
+                        } catch (SkipException se) {
+                            skip++; results.add("SKIP " + f.getName() + ": " + se.getMessage());
+                        } catch (Exception e) {
+                            fail++; results.add("FAIL " + f.getName() + ": " + e.getMessage());
+                            logErr("转换 " + f.getName(), e);
                         } finally {
-                            for (File c : tmpDir.listFiles()) if (c != null) c.delete();
-                            tmpDir.delete();
+                            purgeDir(tmpDir);       // listFiles() 可能返回 null，旧代码在这里会 NPE
                         }
-                    } catch (Exception e) {
-                        fail++; results.add("FAIL " + f.getName() + ": " + e.getMessage());
-                        logErr("递归转换 " + f.getName(), e);
+                        done++;
+                        postProgress(pd, cancelled, lastUpd, done, total,
+                                "转换中 " + done + "/" + total + "  成功 " + ok + "  跳过 " + skip + "  失败 " + fail);
                     }
-                    done++;
-                    final int prog = done;
-                    final String st = "转换中 " + done + "/" + total + "  成功 " + ok + "  失败 " + fail;
-                    runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
-                }
-                for (File z : zipFiles) {
-                    File zdir = tempWorkingDir("stzip_" + done);
-                    try { String r = convertZipReplace(z, zdir); ok++; results.add("OK  " + z.getName() + " -> " + r); }
-                    catch (Exception e) { fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage());
-                        logErr("批量转换 " + z.getName(), e); }
-                    finally {
-                        File[] zfs = zdir.listFiles();
-                        if (zfs != null) for (File c : zfs) c.delete();
-                        zdir.delete();
-                    }
-                    done++;
-                    final int prog = done;
-                    final String st = "转换中 " + done + "/" + total + "  成功 " + ok + "  失败 " + fail;
-                    runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
-                }
-            } else {
-                // ---------- 多线程路径 ----------
-                java.util.concurrent.ExecutorService executor =
-                    java.util.concurrent.Executors.newFixedThreadPool(N);
-
-                final int done[] = {0};
-                java.util.List<java.util.concurrent.Future<String>> futures =
-                    new java.util.ArrayList<>();
-
-                for (final File f : texFiles) {
-                    futures.add(executor.submit(() -> {
-                        String r = runConvertTaskMT(f, f.getParentFile(), results);
-                        synchronized(done) {
-                            done[0]++;
-                            final int prog = done[0];
-                            final String st = "转换中 " + done[0] + "/" + total + "  线程 " + N;
-                            runOnUiThread(() -> { pd.setProgress(prog); pd.setMessage(st); });
-                        }
-                        return r;
-                    }));
-                }
-                for (final File z : zipFiles) {
-                    futures.add(executor.submit(() -> {
+                    for (File z : zipFiles) {
+                        if (cancelled[0]) break;
+                        File zdir = tempWorkingDir("stzip_" + done);
                         try {
-                            return runZipTaskMT(z, results);
+                            String r = convertZipReplace(z, zdir);
+                            ok++; results.add("OK   " + z.getName() + " -> " + r);
+                        } catch (Exception e) {
+                            fail++; results.add("FAIL " + z.getName() + ": " + e.getMessage());
+                            logErr("批量转换 " + z.getName(), e);
                         } finally {
-                            synchronized(done) {
-                                done[0]++;
-                                final int prog = done[0];
-                                runOnUiThread(() -> pd.setProgress(prog));
-                            }
+                            purgeDir(zdir);
                         }
-                    }));
+                        done++;
+                        postProgress(pd, cancelled, lastUpd, done, total,
+                                "转换中 " + done + "/" + total + "  成功 " + ok + "  跳过 " + skip + "  失败 " + fail);
+                    }
+                } else {
+                    // ---------- 多线程路径 ----------
+                    java.util.concurrent.ExecutorService executor =
+                        java.util.concurrent.Executors.newFixedThreadPool(N);
+                    final int[] done = {0};
+                    java.util.List<java.util.concurrent.Future<String>> futures = new java.util.ArrayList<>();
+                    try {
+                        for (final File f : texFiles) {
+                            futures.add(executor.submit(() -> {
+                                String kind = runConvertTaskMT(f, f.getParentFile(), results);
+                                synchronized (done) { done[0]++; }
+                                postProgress(pd, cancelled, lastUpd, done[0], total,
+                                        "转换中 " + done[0] + "/" + total + "  线程 " + N);
+                                return kind;
+                            }));
+                        }
+                        for (final File z : zipFiles) {
+                            futures.add(executor.submit(() -> {
+                                String kind;
+                                try {
+                                    kind = runZipTaskMT(z, results);
+                                } finally {
+                                    synchronized (done) { done[0]++; }
+                                }
+                                postProgress(pd, cancelled, lastUpd, done[0], total,
+                                        "转换中 " + done[0] + "/" + total + "  线程 " + N);
+                                return kind;
+                            }));
+                        }
+                    } finally {
+                        executor.shutdown();
+                    }
+                    try {
+                        while (!executor.awaitTermination(200, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                            if (cancelled[0]) { executor.shutdownNow(); break; }
+                        }
+                    } catch (InterruptedException ie) {
+                        executor.shutdownNow();
+                        Thread.currentThread().interrupt();
+                    }
+                    for (java.util.concurrent.Future<String> f : futures) {
+                        String kind;
+                        try {
+                            kind = f.get();
+                        } catch (Exception e) {
+                            if (e instanceof java.util.concurrent.CancellationException) { skip++; continue; }
+                            fail++; continue;
+                        }
+                        if ("OK".equals(kind)) ok++;
+                        else if ("SKIP".equals(kind)) skip++;
+                        else fail++;
+                    }
                 }
-
-                executor.shutdown();
-                try { executor.awaitTermination(30, java.util.concurrent.TimeUnit.MINUTES); }
-                catch (InterruptedException ignored) {}
-
-                for (java.util.concurrent.Future<String> f : futures) {
-                    try { if (f.get() != null) ok++; else fail++; }
-                    catch (Exception e) { fail++; }
-                }
+            } catch (Throwable t) {
+                // 兜底：任何未预料的异常都必须让进度框关掉，否则界面永久卡死
+                logErr("批量转换中断", t);
+                results.add("!! 中断: " + t);
             }
 
-            final String result = String.join("\n", results);
-            final int fok = ok, ffail = fail;
+            final int fok = ok, ffail = fail, fskip = skip;
             runOnUiThread(() -> {
-                pd.dismiss();
+                try { pd.dismiss(); } catch (Throwable ignored) { }
+                String body = resultBody(results);
                 new AlertDialog.Builder(this)
-                    .setTitle("转换完成")
-                    .setMessage("成功 " + fok + "，失败 " + ffail
+                    .setTitle(cancelled[0] ? "已取消" : "转换完成")
+                    .setMessage("成功 " + fok + "，跳过 " + fskip + "，失败 " + ffail
                         + (N > 1 ? " (" + N + " 线程)" : "")
-                        + "\n（已替换原文件，备份 .bak）\n\n" + result)
+                        + "\n" + (autoBackup ? "（已替换原文件，备份 .bak）" : "（已替换原文件，未备份 —— 设置里可开启 .bak）")
+                        + "\n\n" + body)
                     .setPositiveButton("确定", null)
                     .show();
             });
         }).start();
     }
 
-    // 递归收集文件夹内所有 .tex 与 .zip
+    /** 结果框只列前 RESULT_LINES_MAX 条，避免几千条把对话框撑爆 */
+    private String resultBody(java.util.List<String> results) {
+        if (results.isEmpty()) return "（无输出）";
+        if (results.size() <= RESULT_LINES_MAX) return String.join("\n", results);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < RESULT_LINES_MAX; i++) sb.append(results.get(i)).append('\n');
+        sb.append("… 其余 ").append(results.size() - RESULT_LINES_MAX).append(" 条见「菜单 → 查看日志」");
+        return sb.toString();
+    }
+
+    /** 进度更新节流：每个文件都 runOnUiThread 会把主线程消息队列塞满 */
+    private void postProgress(ProgressDialog pd, boolean[] cancelled, long[] lastUpd,
+                              int done, int total, String msg) {
+        if (cancelled[0]) return;
+        long now = System.currentTimeMillis();
+        if (now - lastUpd[0] < 120 && done < total) return;
+        lastUpd[0] = now;
+        runOnUiThread(() -> {
+            try { pd.setProgress(done); pd.setMessage(msg); } catch (Throwable ignored) { }
+        });
+    }
+
+    /** 递归删除临时目录内容（含子目录） */
+    private void purgeDir(File dir) {
+        if (dir == null) return;
+        File[] fs = dir.listFiles();
+        if (fs != null) for (File c : fs) { if (c.isDirectory()) purgeDir(c); else c.delete(); }
+        dir.delete();
+    }
+
+    // 递归收集文件夹内所有 .tex / .png / .zip（.bak 等一律不碰）
     private void collectTexRecursive(File dir, List<File> texFiles, List<File> zipFiles) {
         File[] fs = dir.listFiles();
         if (fs == null) return;
         for (File f : fs) {
-            if (f.isDirectory()) collectTexRecursive(f, texFiles, zipFiles);
-            else if (f.getName().toLowerCase().endsWith(".tex")) texFiles.add(f);
-            else if (f.getName().toLowerCase().endsWith(".zip")) zipFiles.add(f);
+            if (f.isDirectory()) { collectTexRecursive(f, texFiles, zipFiles); continue; }
+            String n = f.getName().toLowerCase();
+            if (n.endsWith(".bak")) continue;
+            if (n.endsWith(".zip")) zipFiles.add(f);
+            else if (n.endsWith(".tex") || n.endsWith(".png")) texFiles.add(f);
         }
+    }
+
+    /** 「按当前模式这个文件不需要处理」—— 跳过不是失败，不计入 fail */
+    static class SkipException extends Exception {
+        SkipException(String m) { super(m); }
     }
 
     private String convertFile(File f, File outputDir, File tmpDir) throws Exception {
         String n = f.getName().toLowerCase();
         log("convertFile " + f.getName() + " (" + f.length() + "B) mode=" + convertMode);
+        if (n.endsWith(".bak")) throw new SkipException("备份文件，跳过");
         if (n.endsWith(".png")) {
-            if (convertMode.equals("tex2png")) throw new Exception("当前模式为 TEX→PNG，跳过 PNG");
+            if (convertMode.equals("tex2png")) throw new SkipException("当前模式为 TEX→PNG，跳过 PNG");
             return pngToTex(f, outputDir, tmpDir);
         } else if (n.endsWith(".tex")) {
             int comp = readTexCompression(f);
-            if (convertMode.equals("png2tex")) throw new Exception("当前模式为 PNG→TEX，跳过 TEX");
+            if (convertMode.equals("png2tex")) throw new SkipException("当前模式为 PNG→TEX，跳过 TEX");
             if (convertMode.equals("tex2png")) return texToPng(f, outputDir, tmpDir);
             if (convertMode.equals("dxt2astc")) {
-                if (comp == 24) throw new Exception("已是 ASTC，跳过");
+                if (comp == 24) throw new SkipException("已是 ASTC，跳过");
                 return texToAstc(f, outputDir, tmpDir);
             }
             // auto
-            if (comp == 24) {
-                return texToPng(f, outputDir, tmpDir);
-            } else {
-                return texToAstc(f, outputDir, tmpDir);
-            }
+            return comp == 24 ? texToPng(f, outputDir, tmpDir) : texToAstc(f, outputDir, tmpDir);
         }
-        throw new Exception("不支持的文件类型");
+        throw new SkipException("不支持的文件类型");
     }
 
     private String pngToTex(File png, File outputDir, File tmpDir) throws Exception {
-        int[] wh = readPngSize(png);
         File flip = new File(tmpDir, "flip.png");
         flipPng(png, flip);
         byte[] ktex = buildAstcKtex(flip, tmpDir);
         File out = new File(outputDir, baseName(png) + ".tex");
-        writeFile(out, ktex);
+        // 同名 .tex 已存在 → 备份后再写, 否则会无提示覆盖掉用户的原纹理
+        if (out.exists() && !out.equals(png)) {
+            if (autoBackup) backupOnce(out);
+            log("!! 覆盖同名 tex: " + out.getName() + (autoBackup ? "(已备份 .bak)" : "(未备份)"));
+        }
+        writeFileAtomic(out, ktex);
         return out.getName();
     }
 
     private String texToAstc(File tex, File outputDir, File tmpDir) throws Exception {
         File flipPng = new File(tmpDir, "decoded.png");
         runTex2png(tex.getAbsolutePath(), flipPng.getAbsolutePath());
-        int[] wh = readPngSize(flipPng);
         byte[] ktex = buildAstcKtex(flipPng, tmpDir);
-        File bak = null;
-        if (autoBackup) {
-            bak = new File(tex.getAbsolutePath() + ".bak");
-            if (!bak.exists()) copyFile(tex, bak);
-        }
-        writeFile(tex, ktex);
-        return autoBackup ? "已替换，原文件→" + bak.getName() : "已替换（未备份）";
+        // 先备份再原子替换: 任何一步失败, 原文件都还在
+        if (autoBackup) backupOnce(tex);
+        writeFileAtomic(tex, ktex);
+        return autoBackup ? "已替换，原文件→" + tex.getName() + ".bak" : "已替换（未备份）";
     }
 
     private String texToPng(File tex, File outputDir, File tmpDir) throws Exception {
@@ -1933,6 +2014,8 @@ public class TexConverter extends Activity {
         File flipPng = new File(tmpDir, "decoded.png");
         runAstcenc("-dl", astc.getAbsolutePath(), flipPng.getAbsolutePath());
         File out = new File(outputDir, baseName(tex) + ".png");
+        // 同名 png 已存在时不要直接覆盖(可能是用户自己的图)
+        if (out.exists() && !out.equals(tex) && autoBackup) backupOnce(out);
         flipPng(flipPng, out);
         return out.getName();
     }
@@ -1941,58 +2024,97 @@ public class TexConverter extends Activity {
     private String convertZipReplace(File zip, File tmpDir) throws Exception {
         log("convertZip " + zip.getName() + " (" + zip.length() + "B) nested=" + nestedZip);
         final int[] skip = new int[2];      // [0]=已是ASTC, [1]=模式不符
-        int ok = 0;
-        // 文件名唯一: 多线程批量转换时同一 tmpDir 下不能撞名
-        File tmp = new File(tmpDir, "new_" + TMP_SEQ.incrementAndGet() + ".zip");
-        ZipFile zf = new ZipFile(zip);
-        ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(tmp));
-        java.util.Enumeration<? extends ZipEntry> en = zf.entries();
-        while (en.hasMoreElements()) {
-            ZipEntry ze = en.nextElement();
-            String n = ze.getName().toLowerCase();
-            ZipEntry ne = new ZipEntry(ze.getName());
-            if (ze.getTime() > 0) ne.setTime(ze.getTime());
-            zos.putNextEntry(ne);
-            if (!ze.isDirectory() && n.endsWith(".tex")) {
-                byte[] data = readAll(zf.getInputStream(ze));
-                try {
-                    byte[] out2 = convertTexByMode(data, tmpDir, ze.getName(), skip);
-                    if (out2 != data) ok++;
-                    data = out2;
-                } catch (Exception ex) {
-                    log("    跳过 " + ze.getName() + ": " + ex.getMessage());
+        final int[] ok = new int[1];
+        // 临时包放在原文件同目录: (a) 不吃 cacheDir 配额 (b) rename 同分区原子且无需整包再拷贝
+        File tmp = new File(zip.getParentFile(), zip.getName() + ".tmp" + TMP_SEQ.incrementAndGet());
+        ZipFile zf = null;
+        try {
+            zf = new ZipFile(zip);
+            ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(tmp));
+            try {
+                java.util.Enumeration<? extends ZipEntry> en = zf.entries();
+                java.util.Set<String> used = new java.util.HashSet<>();
+                while (en.hasMoreElements()) {
+                    ZipEntry ze = en.nextElement();
+                    String entryName = ze.getName();
+                    byte[] data = null;          // null = 走流式拷贝(不整块读入内存)
+                    if (!ze.isDirectory()) {
+                        String ln = entryName.toLowerCase();
+                        if (ln.endsWith(".tex")) {
+                            byte[] raw = readAll(zf.getInputStream(ze));
+                            try {
+                                TexConvOut o = convertTexByMode(raw, tmpDir, entryName, skip);
+                                data = o.data;
+                                if (o.changed) ok[0]++;
+                                if (o.name != null) entryName = o.name;   // 如 TEX→PNG 需改扩展名
+                            } catch (Exception ex) {
+                                log("    跳过 " + entryName + ": " + ex.getMessage());
+                                data = raw;
+                            }
+                        } else if (ln.endsWith(".zip") && nestedZip) {
+                            // 内嵌压缩包: 递归处理其中(及其内层)的 tex
+                            byte[] inner = readAll(zf.getInputStream(ze));
+                            Object[] r = convertZipBytes(inner, tmpDir, skip);
+                            data = (byte[]) r[0];
+                            ok[0] += (Integer) r[1];
+                        }
+                    }
+                    entryName = uniqueName(used, entryName);
+                    ZipEntry ne = new ZipEntry(entryName);
+                    if (ze.getTime() > 0) ne.setTime(ze.getTime());
+                    zos.putNextEntry(ne);
+                    if (data != null) {
+                        zos.write(data);
+                    } else {
+                        InputStream in = zf.getInputStream(ze);
+                        byte[] buf = new byte[65536];
+                        int r;
+                        while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
+                        in.close();
+                    }
+                    zos.closeEntry();
                 }
-                zos.write(data);
-            } else if (!ze.isDirectory() && n.endsWith(".zip") && nestedZip) {
-                // 内嵌压缩包: 递归处理其中(及其内层)的 tex
-                byte[] inner = readAll(zf.getInputStream(ze));
-                Object[] r = convertZipBytes(inner, tmpDir, skip);
-                zos.write((byte[]) r[0]);
-                ok += (Integer) r[1];
-            } else {
-                // 其余条目流式拷贝, 避免整包读入内存导致大 zip OOM
-                InputStream in = zf.getInputStream(ze);
-                byte[] buf = new byte[65536];
-                int r;
-                while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
-                in.close();
+            } finally {
+                try { zos.close(); } catch (Throwable ignored) { }
             }
-            zos.closeEntry();
+        } finally {
+            if (zf != null) { try { zf.close(); } catch (Throwable ignored) { } }
         }
-        zos.close();
-        zf.close();
-        if (ok == 0) log("!! 顶层 zip 未发现任何可转换的 .tex —— 请对照上方内嵌 zip 的类型分布确认");
-        if (autoBackup) {
-            File bak = new File(zip.getAbsolutePath() + ".bak");
-            if (!bak.exists()) copyFile(zip, bak);
-        }
-        copyFile(tmp, zip);
-        tmp.delete();
+
         String tail = "";
         if (skip[0] > 0) tail += ", " + skip[0] + " 个已是 ASTC 跳过";
         if (skip[1] > 0) tail += ", " + skip[1] + " 个模式不符跳过";
-        log("convertZip 完成 " + zip.getName() + " -> 转换 " + ok + tail);
-        return "zip 内 " + ok + " 个 tex 已转换" + tail;
+
+        if (ok[0] == 0) {
+            // 没有任何改动就不要重写原包: 否则会白改压缩率/时间戳, 还平白冒一次写坏的风险
+            tmp.delete();
+            log("convertZip 无改动, 保持原包 " + zip.getName() + tail);
+            return "zip 内无可转换的 tex（原包未改动）" + tail;
+        }
+        if (autoBackup) backupOnce(zip);
+        // 原子替换: rename 失败(跨分区/被占用)时退化为拷贝覆盖
+        if (!tmp.renameTo(zip)) {
+            log("!! zip 原子替换失败, 退化为拷贝覆盖: " + zip.getName());
+            copyFile(tmp, zip);
+            tmp.delete();
+        }
+        log("convertZip 完成 " + zip.getName() + " -> 转换 " + ok[0] + tail);
+        return "zip 内 " + ok[0] + " 个 tex 已转换" + tail
+             + (autoBackup ? "（原包→" + zip.getName() + ".bak）" : "");
+    }
+
+    /** zip 条目名去重: TEX→PNG 后可能与已有 png 撞名, 撞了就加序号 */
+    private static String uniqueName(java.util.Set<String> used, String name) {
+        if (used.add(name)) return name;
+        String base = name, ext = "";
+        int dot = name.lastIndexOf('.');
+        int slash = name.lastIndexOf('/');
+        if (dot > slash) { base = name.substring(0, dot); ext = name.substring(dot); }
+        for (int i = 1; i < 1000; i++) {
+            String cand = base + "~" + i + ext;
+            if (used.add(cand)) return cand;
+        }
+        return name;
     }
 
     /**
@@ -2016,50 +2138,65 @@ public class TexConverter extends Activity {
         File out = new File(tmpDir, "inner_" + seq + "_out.zip");
         writeFile(in, zipData);
         int ok = 0;
-        ZipFile zf = new ZipFile(in);
-        ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(out));
-        java.util.Enumeration<? extends ZipEntry> en = zf.entries();
-        while (en.hasMoreElements()) {
-            ZipEntry ze = en.nextElement();
-            String n = ze.getName().toLowerCase();
-            ZipEntry ne = new ZipEntry(ze.getName());
-            if (ze.getTime() > 0) ne.setTime(ze.getTime());
-            zos.putNextEntry(ne);
-            // 统计: 记录条目类型分布, 便于判断"为什么没找到 tex"
-            if (!ze.isDirectory()) {
-                entryTotal++;
-                int dot = n.lastIndexOf('.');
-                String ext = dot >= 0 ? n.substring(dot) : "(无扩展名)";
-                Integer c = extCnt.get(ext);
-                extCnt.put(ext, c == null ? 1 : c + 1);
-                if (nameSample < 3) { nameBuf.append('\n').append("      ").append(ze.getName()); nameSample++; }
-            }
-            if (!ze.isDirectory() && n.endsWith(".tex")) {
-                byte[] data = readAll(zf.getInputStream(ze));
-                try {
-                    byte[] out2 = convertTexByMode(data, tmpDir, ze.getName(), skip);
-                    if (out2 != data) ok++;
-                    data = out2;
-                } catch (Exception ex) {
-                    log("    跳过 " + ze.getName() + ": " + ex.getMessage());
+        ZipFile zf = null;
+        try {
+            zf = new ZipFile(in);
+            ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(out));
+            try {
+                java.util.Enumeration<? extends ZipEntry> en = zf.entries();
+                java.util.Set<String> used = new java.util.HashSet<>();
+                while (en.hasMoreElements()) {
+                    ZipEntry ze = en.nextElement();
+                    String entryName = ze.getName();
+                    String n = entryName.toLowerCase();
+                    byte[] data = null;
+                    // 统计: 记录条目类型分布, 便于判断"为什么没找到 tex"
+                    if (!ze.isDirectory()) {
+                        entryTotal++;
+                        int dot = n.lastIndexOf('.');
+                        String ext = dot >= 0 ? n.substring(dot) : "(无扩展名)";
+                        Integer c = extCnt.get(ext);
+                        extCnt.put(ext, c == null ? 1 : c + 1);
+                        if (nameSample < 3) { nameBuf.append('\n').append("      ").append(entryName); nameSample++; }
+                        if (n.endsWith(".tex")) {
+                            byte[] raw = readAll(zf.getInputStream(ze));
+                            try {
+                                TexConvOut o = convertTexByMode(raw, tmpDir, entryName, skip);
+                                data = o.data;
+                                if (o.changed) ok++;
+                                if (o.name != null) entryName = o.name;
+                            } catch (Exception ex) {
+                                log("    跳过 " + entryName + ": " + ex.getMessage());
+                                data = raw;
+                            }
+                        } else if (n.endsWith(".zip")) {
+                            byte[] inner = readAll(zf.getInputStream(ze));
+                            Object[] r = convertZipBytes(inner, tmpDir, depth + 1, skip);
+                            data = (byte[]) r[0];
+                            ok += (Integer) r[1];
+                        }
+                    }
+                    entryName = uniqueName(used, entryName);
+                    ZipEntry ne = new ZipEntry(entryName);
+                    if (ze.getTime() > 0) ne.setTime(ze.getTime());
+                    zos.putNextEntry(ne);
+                    if (data != null) {
+                        zos.write(data);
+                    } else {
+                        InputStream ins = zf.getInputStream(ze);
+                        byte[] buf = new byte[65536];
+                        int r;
+                        while ((r = ins.read(buf)) > 0) zos.write(buf, 0, r);
+                        ins.close();
+                    }
+                    zos.closeEntry();
                 }
-                zos.write(data);
-            } else if (!ze.isDirectory() && n.endsWith(".zip")) {
-                byte[] inner = readAll(zf.getInputStream(ze));
-                Object[] r = convertZipBytes(inner, tmpDir, depth + 1, skip);
-                zos.write((byte[]) r[0]);
-                ok += (Integer) r[1];
-            } else {
-                InputStream ins = zf.getInputStream(ze);
-                byte[] buf = new byte[65536];
-                int r;
-                while ((r = ins.read(buf)) > 0) zos.write(buf, 0, r);
-                ins.close();
+            } finally {
+                try { zos.close(); } catch (Throwable ignored) { }
             }
-            zos.closeEntry();
+        } finally {
+            if (zf != null) { try { zf.close(); } catch (Throwable ignored) { } }
         }
-        zos.close();
-        zf.close();
         // 输出条目类型分布(仅顶层 depth, 避免日志爆量)
         if (entryTotal > 0 && depth == 0) {
             log("    条目 " + entryTotal + " 个, 类型: " + extCnt);
@@ -2067,53 +2204,77 @@ public class TexConverter extends Activity {
         } else if (entryTotal == 0) {
             log("    !! 该 zip 内没有文件条目");
         }
-        FileInputStream fis = new FileInputStream(out);
-        byte[] res = readAll(fis);
+        byte[] res = readAll(new FileInputStream(out));
         in.delete(); out.delete();
         return new Object[]{res, ok};
     }
 
+    /** 一次 tex 转换的结果：数据 + 是否真的改动了 + 需要改的条目名(null=不改) */
+    static class TexConvOut {
+        byte[] data; boolean changed; String name;
+        TexConvOut(byte[] d, boolean c, String n) { data = d; changed = c; name = n; }
+    }
+
+    /** 改扩展名，保留 zip 内的目录前缀 */
+    private static String replaceExt(String name, String newExt) {
+        int slash = name.lastIndexOf('/');
+        int dot = name.lastIndexOf('.');
+        if (dot <= slash) return name + newExt;
+        return name.substring(0, dot) + newExt;
+    }
+
     /**
      * 按当前转换模式处理一份 tex 字节(顶层与内嵌压缩包共用, 保证行为一致)。
-     * 之前内嵌分支漏了模式判断, 导致所选模式对嵌套层失效。
-     * @return 处理后的字节; 若按当前模式无需处理则原样返回
+     * 注意 TEX→PNG 时条目名必须一起改成 .png —— 之前只换内容不换名,
+     * 会在包内留下「扩展名是 .tex、内容是 PNG」的假纹理。
      */
-    private byte[] convertTexByMode(byte[] data, File tmpDir, String name, int[] skip) throws Exception {
+    private TexConvOut convertTexByMode(byte[] data, File tmpDir, String name, int[] skip) throws Exception {
         int comp = readTexCompression(data);
         log("    tex " + name + " comp=" + comp + " mode=" + convertMode);
         if (convertMode.equals("png2tex")) {
             skip[1]++;
             log("    跳过(模式不符) " + name);
-            return data;
+            return new TexConvOut(data, false, null);
         }
         if (convertMode.equals("dxt2astc") && comp == 24) {
             skip[0]++;
             log("    跳过(已是 ASTC) " + name);
-            return data;
+            return new TexConvOut(data, false, null);
         }
-        if (convertMode.equals("tex2png")) {
-            File t = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".tex");
-            writeFile(t, data);
-            File p = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".png");
-            runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
-            byte[] png = readAll(new FileInputStream(p));
-            t.delete(); p.delete();
-            return png;
+        if (convertMode.equals("tex2png") || (convertMode.equals("auto") && comp == 24)) {
+            // 注意: ASTC(comp=24) 必须走 astcenc, tex2png 只认 DXT/RGBA ——
+            // 原来这里一律调 runTex2png, 导致 TEX→PNG 模式下遇到 ASTC 纹理全部失败。
+            return new TexConvOut(texBytesToPng(data, comp, tmpDir), true, replaceExt(name, ".png"));
         }
         if (convertMode.equals("dxt2astc")) {
-            return convertTexBytes(data, tmpDir);
+            return new TexConvOut(convertTexBytes(data, tmpDir), true, null);
         }
-        // auto: ASTC -> PNG, 其余 -> ASTC
-        if (comp == 24) {
-            File t = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".tex");
-            writeFile(t, data);
-            File p = new File(tmpDir, "m_" + TMP_SEQ.incrementAndGet() + ".png");
-            runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
-            byte[] png = readAll(new FileInputStream(p));
-            t.delete(); p.delete();
-            return png;
+        // auto: 非 ASTC -> ASTC
+        return new TexConvOut(convertTexBytes(data, tmpDir), true, null);
+    }
+
+    /** tex 字节 → png 字节（comp=24 走 astcenc 反解，其余走 tex2png） */
+    private byte[] texBytesToPng(byte[] data, int comp, File tmpDir) throws Exception {
+        final int seq = TMP_SEQ.incrementAndGet();
+        File t = new File(tmpDir, "m_" + seq + ".tex");
+        File p = new File(tmpDir, "m_" + seq + ".png");
+        File astc = new File(tmpDir, "m_" + seq + ".astc");
+        try {
+            if (comp == 24) {
+                KtexInfo info = unpackKtex(data);
+                byte[] full = new byte[info.raw.length + 16];
+                writeAstcHeader(full, info.w, info.h);
+                System.arraycopy(info.raw, 0, full, 16, info.raw.length);
+                writeFile(astc, full);
+                runAstcenc("-dl", astc.getAbsolutePath(), p.getAbsolutePath());
+            } else {
+                writeFile(t, data);
+                runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
+            }
+            return readAll(new FileInputStream(p));
+        } finally {
+            t.delete(); p.delete(); astc.delete();
         }
-        return convertTexBytes(data, tmpDir);
     }
 
     // 内存中把 DXT/RGBA tex 字节转成 ASTC tex 字节
@@ -2123,8 +2284,12 @@ public class TexConverter extends Activity {
         writeFile(tmpTex, texData);
         File png = new File(tmpDir, "tmp_" + seq + ".png");
         runTex2png(tmpTex.getAbsolutePath(), png.getAbsolutePath());
-        int[] wh = readPngSize(png);
-        return buildAstcKtex(png, tmpDir);
+        try {
+            return buildAstcKtex(png, tmpDir);
+        } finally {
+            tmpTex.delete();
+            png.delete();
+        }
     }
 
     // ---------- 翻转 ----------
@@ -2189,7 +2354,7 @@ public class TexConverter extends Activity {
                 FileOutputStream fos = new FileOutputStream(in);
                 cur.compress(Bitmap.CompressFormat.PNG, 100, fos);
                 fos.close();
-                runAstcenc("-cl", in.getAbsolutePath(), out.getAbsolutePath(), blockSize, "-" + quality);
+                runAstcenc("-cl", in.getAbsolutePath(), out.getAbsolutePath(), ASTC_BLOCK, "-" + quality);
                 dims.add(new int[]{w, h});
                 datas.add(stripAstcHeader(readFile(out)));
                 in.delete(); out.delete();
@@ -2246,6 +2411,9 @@ public class TexConverter extends Activity {
         return raw;
     }
 
+    // ASTC 通用头 —— 固定 8x8 块(1 plane, 1 texel/块)。
+    // 这里与 packKtexLevels 的 pitch/datasz 必须成套: 任何一方改动都要同步，
+    // 否则会出现「头部说 8x8、数据是 4x4」的废纹理。
     static void writeAstcHeader(byte[] buf, int w, int h) {
         buf[0] = 0x13; buf[1] = (byte) 0xAB; buf[2] = (byte) 0xA1; buf[3] = 0x5C;
         buf[4] = 8; buf[5] = 8; buf[6] = 1;
@@ -2287,6 +2455,40 @@ public class TexConverter extends Activity {
         FileOutputStream out = new FileOutputStream(f);
         out.write(data);
         out.close();
+    }
+
+    /**
+     * 原子写: 同目录写 .tmp → fsync → rename 覆盖目标。
+     * rename 在同一文件系统上是原子的, 所以中途失败(存储满/进程被杀/OOM)时
+     * 目标文件保持原样, 不会变成半截垃圾。
+     */
+    private void writeFileAtomic(File target, byte[] data) throws Exception {
+        File dir = target.getParentFile();
+        if (dir == null || !dir.isDirectory()) { writeFile(target, data); return; }
+        File tmp = new File(dir, target.getName() + ".tmp" + TMP_SEQ.incrementAndGet());
+        try {
+            FileOutputStream out = new FileOutputStream(tmp);
+            try {
+                out.write(data);
+                out.flush();
+                out.getFD().sync();
+            } finally {
+                try { out.close(); } catch (Throwable ignored) { }
+            }
+            if (!tmp.renameTo(target)) {
+                // 个别文件系统裸 rename 会失败: 退化为直接覆盖(仍是老行为, 但至少不丢数据)
+                log("!! 原子 rename 失败, 退化为直接写入: " + target.getName());
+                writeFile(target, data);
+            }
+        } finally {
+            if (tmp.exists()) tmp.delete();
+        }
+    }
+
+    /** 备份为 <name>.bak; 已存在则保留最早那份(避免二次转换把原始文件覆盖掉) */
+    private void backupOnce(File f) throws Exception {
+        File bak = new File(f.getAbsolutePath() + ".bak");
+        if (!bak.exists()) copyFile(f, bak);
     }
 
     private void copyStream(InputStream in, OutputStream out) throws Exception {

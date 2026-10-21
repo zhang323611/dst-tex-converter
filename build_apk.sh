@@ -26,6 +26,7 @@ elif [ -n "$ANDROID_NDK_ROOT" ]; then
     NDK="$ANDROID_NDK_ROOT"
 else
     NDK=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1)
+    [ -n "$NDK" ] || { echo "错误：未找到 Android NDK，请设置 ANDROID_NDK_HOME"; exit 1; }
 fi
 
 BT="$SDK/build-tools/34.0.0"
@@ -58,7 +59,7 @@ EOF
 # ---------- 编译 native 动态库 ----------
 echo "=== 编译 libastcenc.so ==="
 ( cd "$ASTCENC" && SOURCES=$(ls *.cpp | grep -v astcenccli_entry.cpp); \
-  "$CLANG" -O2 -fPIC -shared -std=c++14 -static-libstdc++ -pthread \
+  "$CLANG" -O2 -Wl,-s -fPIC -shared -std=c++14 -static-libstdc++ -pthread \
     -DASTCENC_NEON=1 -DASTCENC_SVE=0 -DASTCENC_SSE=0 -DASTCENC_AVX=0 \
     -DASTCENC_POPCNT=0 -DASTCENC_F16C=0 \
     -I. -I"$WORK/gen" \
@@ -66,7 +67,7 @@ echo "=== 编译 libastcenc.so ==="
     -o "$WORK/lib/arm64-v8a/libastcenc.so" -lm )
 
 echo "=== 编译 libtex2png.so ==="
-"$CLANG" -O2 -fPIC -shared -std=c++14 -static-libstdc++ \
+"$CLANG" -O2 -Wl,-s -fPIC -shared -std=c++14 -static-libstdc++ \
   -I"$SQUISH" -I"$NATIVE" \
   "$NATIVE/tex2png.cpp" "$NATIVE/jni_tex2png.cpp" \
   "$SQUISH/alpha.cpp" "$SQUISH/clusterfit.cpp" "$SQUISH/colourblock.cpp" \
@@ -81,11 +82,13 @@ javac -source 8 -target 8 -classpath "$JAR" -d "$WORK/classes" "$WORK/src/com/ds
 
 # ---------- d8 转 dex ----------
 echo "=== d8 转 dex ==="
-"$BT/d8" --release --min-api 21 --lib "$JAR" --output "$WORK" "$WORK/classes/com/dsttex/"*.class
+"$BT/d8" --release --min-api 24 --lib "$JAR" --output "$WORK" "$WORK/classes/com/dsttex/"*.class
 
 # ---------- aapt2 打包 ----------
 echo "=== aapt2 link ==="
-"$BT/aapt2" link -o "$WORK/base.apk" -I "$JAR" --manifest "$ROOT/app/AndroidManifest.xml"
+"$BT/aapt2" link -o "$WORK/base.apk" -I "$JAR" \
+  --min-sdk-version 24 --target-sdk-version 29 \
+  --manifest "$ROOT/app/AndroidManifest.xml"
 
 cd "$WORK"
 python3 - <<'PYEOF'

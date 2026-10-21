@@ -35,6 +35,8 @@ public class AnimEditor extends Activity {
 
     private AnimEditorView view;
     private TextView infoView;
+    private SeekBar frameBar;
+    private boolean updatingBar = false;
     private int animIdx = 0, frameIdx = 0;
     private boolean playing = false;
     private final Handler handler = new Handler();
@@ -126,14 +128,16 @@ public class AnimEditor extends Activity {
         Button prev = barBtn("◀", v -> step(-1));
         Button next = barBtn("▶", v -> step(1));
         bot.addView(prev);
-        final SeekBar sb = new SeekBar(this);
-        sb.setMax(Math.max(0, curAnim().frames.length - 1));
-        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar s, int val, boolean u) { setFrame(val); }
+        frameBar = new SeekBar(this);
+        frameBar.setMax(Math.max(0, curAnim().frames.length - 1));
+        frameBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar s, int val, boolean fromUser) {
+                if (!updatingBar) setFrame(val);   // 程序同步位置时不要反过来再触发 setFrame
+            }
             public void onStartTrackingTouch(SeekBar s) {}
             public void onStopTrackingTouch(SeekBar s) {}
         });
-        bot.addView(sb, new LinearLayout.LayoutParams(0, -2, 1));
+        bot.addView(frameBar, new LinearLayout.LayoutParams(0, -2, 1));
         bot.addView(next);
         main.addView(bot);
 
@@ -192,6 +196,27 @@ public class AnimEditor extends Activity {
         }
     }
 
+    /** 尽量把 content:// 解析成真实文件；解析不出来返回 null（保存时改为另存并提示） */
+    private java.io.File resolveRealFile(android.net.Uri uri) {
+        try {
+            if (uri == null) return null;
+            String scheme = uri.getScheme();
+            if ("file".equals(scheme)) {
+                java.io.File f = new java.io.File(uri.getPath());
+                return f.isFile() ? f : null;
+            }
+            String p = uri.getPath();
+            if (p == null) return null;
+            int i = p.indexOf("/storage/");
+            if (i < 0) i = p.indexOf("/sdcard/");
+            if (i < 0) return null;
+            java.io.File f = new java.io.File(i > 0 ? p.substring(i) : p);
+            return f.isFile() ? f : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     @Override
     protected void onActivityResult(int req, int res, android.content.Intent data) {
         super.onActivityResult(req, res, data);
@@ -208,14 +233,18 @@ public class AnimEditor extends Activity {
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
                 in.close(); out.close();
                 final boolean ok = TexConverter.loadAnimAsset(getApplicationContext(), tmp);
+                // 记住用户选择的真实文件 —— 否则"保存"只会改写 cacheDir 里的临时副本
+                final java.io.File real = resolveRealFile(uri);
+                TexConverter.sAnimSrc = real;
                 runOnUiThread(() -> {
                     if (!ok) { toast("导入失败: 不是有效的动画压缩包"); return; }
                     frameIdx = 0; animIdx = 0;
                     view.sel = null;
+                    syncFrameBar();
                     rebuildElemList();
                     updateInfo();
                     view.invalidate();
-                    toast("已导入 " + tmp.getName());
+                    toast(real != null ? "已导入 " + real.getName() : "已导入（拿不到原始路径，保存将另存到下载目录）");
                 });
             } catch (Throwable t) {
                 runOnUiThread(() -> toast("导入失败: " + t.getMessage()));
@@ -294,16 +323,32 @@ public class AnimEditor extends Activity {
             names[i] = arr[i].name + "  (" + arr[i].frames.length + " 帧, " + arr[i].frameRate + "fps)";
         new android.app.AlertDialog.Builder(this)
             .setTitle("选择动画")
-            .setItems(names, (d, w) -> { animIdx = w; frameIdx = 0; view.sel = null;
-                rebuildElemList(); view.invalidate(); updateInfo(); })
+            .setItems(names, (d, w) -> {
+                animIdx = w; frameIdx = 0; view.sel = null;
+                syncFrameBar();          // 新动画帧数可能不同，必须重设滑条上限
+                rebuildElemList();
+                view.invalidate(); updateInfo();
+            })
             .setNegativeButton("取消", null).show();
     }
 
     private void setFrame(int f) {
         frameIdx = Math.max(0, Math.min(f, curAnim().frames.length - 1));
-        rebuildElemList();
+        // 播放中不要每帧重建左侧元素列表(30fps × 上百个 Button = 明显卡顿)
+        if (!playing) rebuildElemList();
+        syncFrameBar();
         view.invalidate();
         updateInfo();
+    }
+
+    /** 帧滑条是全局唯一的，切换动画/跳帧时都要同步 max 与位置(旧代码 sb 是局部变量，切动画后 max 不变) */
+    private void syncFrameBar() {
+        if (frameBar == null) return;
+        int n = curAnim().frames.length;
+        updatingBar = true;
+        frameBar.setMax(Math.max(0, n - 1));
+        frameBar.setProgress(Math.min(frameIdx, Math.max(0, n - 1)));
+        updatingBar = false;
     }
 
     private void step(int d) { setFrame(frameIdx + d); }
@@ -324,6 +369,7 @@ public class AnimEditor extends Activity {
             handler.post(tick);
         } else {
             handler.removeCallbacks(tick);
+            rebuildElemList();       // 播放期间列表没重建，停下来补一次
         }
         updateInfo();
     }
@@ -383,22 +429,37 @@ public class AnimEditor extends Activity {
         void resetView() { zoom = 1f; panX = 0; panY = 0; sel = null; }
 
         // ---- 元素编辑 ----
-        // 撤销栈: 每次修改前压入 {a,b,c,d,tx,ty,z,buildFrame}
-        private final java.util.ArrayDeque<float[]> undoStack = new java.util.ArrayDeque<>();
+        /** 撤销条目：必须带元素引用 —— 只存数值的话，切到别的元素后撤销会把旧值写到错误的对象上 */
+        private final class Undo {
+            final TexConverter.AElement el;
+            final float a, b, c, d, tx, ty, z;
+            final int bf;
+            Undo(TexConverter.AElement e) {
+                el = e;
+                a = e.a; b = e.b; c = e.c; d = e.d;
+                tx = e.tx; ty = e.ty; z = e.z; bf = e.buildFrame;
+            }
+            void apply() {
+                el.a = a; el.b = b; el.c = c; el.d = d;
+                el.tx = tx; el.ty = ty; el.z = z; el.buildFrame = bf;
+            }
+        }
+        private final java.util.ArrayDeque<Undo> undoStack = new java.util.ArrayDeque<>();
+        private boolean dragUndoPushed = false;
 
         private void pushUndo(TexConverter.AElement e) {
             if (e == null) return;
-            undoStack.push(new float[]{e.a, e.b, e.c, e.d, e.tx, e.ty, e.z, e.buildFrame});
+            undoStack.push(new Undo(e));
             if (undoStack.size() > 80) undoStack.removeLast();
         }
 
         void undo() {
-            TexConverter.AElement e = sel;
-            if (e == null || undoStack.isEmpty()) { toast("无可撤销"); return; }
-            float[] v = undoStack.pop();
-            e.a = v[0]; e.b = v[1]; e.c = v[2]; e.d = v[3];
-            e.tx = v[4]; e.ty = v[5]; e.z = v[6]; e.buildFrame = (int) v[7];
+            if (undoStack.isEmpty()) { toast("无可撤销"); return; }
+            Undo u = undoStack.pop();
+            u.apply();
+            sel = u.el;          // 选中同步切回被撤销的那个元素
             invalidate();
+            rebuildElemList();
         }
 
         private boolean needSel() {
@@ -546,6 +607,7 @@ public class AnimEditor extends Activity {
             switch (ev.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN: {
                     downX = ev.getX(); downY = ev.getY();
+                    dragUndoPushed = false;
                     TexConverter.AElement hit = hitTest(downX, downY);
                     if (hit != null) {
                         sel = hit;
@@ -565,6 +627,8 @@ public class AnimEditor extends Activity {
                         downX = ev.getX(); downY = ev.getY();
                         invalidate();
                     } else if (sel != null) {
+                        // 拖动也要能撤销：在第一次真正改动前压栈（此时 tx/ty 仍是原值）
+                        if (!dragUndoPushed) { pushUndo(sel); dragUndoPushed = true; }
                         float s = scale <= 0 ? 1f : scale;
                         // sxf/syf 两个方向导数均为 +scale
                         sel.tx = startTx + dx / s;
@@ -584,59 +648,110 @@ public class AnimEditor extends Activity {
     }
 
     // ================= 保存 =================
-    /** 把编辑后的元素变换写回 anim.bin(原地改写 tx/ty 字节), 并替换 zip 内条目 */
+    /**
+     * 把编辑后的元素变换写回 anim.bin，并替换 zip 内条目。
+     * 注意：整包解压/重压很耗时，必须在后台线程做（旧实现在 UI 线程，大模组必 ANR）；
+     * 且写目标必须是用户的原文件，否则"保存成功"只是改了个缓存副本。
+     */
     private void save() {
+        final byte[] anim = TexConverter.sAnimBytes;
+        if (anim == null) { toast("无 anim.bin 数据"); return; }
+        final File src = TexConverter.sAnimSrc != null ? TexConverter.sAnimSrc : TexConverter.sAnimZip;
+        if (src == null || !src.isFile()) { toast("找不到原压缩包，无法写回"); return; }
+
+        final boolean toOriginal = TexConverter.sAnimSrc != null;
+        final File target = toOriginal ? src : editOutputFile(src);
+        toast(toOriginal ? "正在写回原包 …" : "正在另存到 " + target.getName() + " …");
+        new Thread(() -> {
+            try {
+                final int patched = patchAnimBytes(anim);
+                // 临时包放在目标同目录 → rename 原子，写一半失败不会毁掉原包
+                File tmp = new File(target.getParentFile(), target.getName() + ".tmpSave");
+                repackZip(src, anim, tmp);
+                if (toOriginal) {
+                    File bak = new File(target.getAbsolutePath() + ".bak");
+                    if (!bak.exists()) copyFile(src, bak);
+                }
+                if (!tmp.renameTo(target)) {
+                    copyFile(tmp, target);
+                    tmp.delete();
+                }
+                final String msg = toOriginal
+                        ? "已保存: 改写 " + patched + " 个元素 → " + target.getName() + "（原包备份 .bak）"
+                        : "已另存: 改写 " + patched + " 个元素 → " + target.getAbsolutePath();
+                runOnUiThread(() -> toast(msg));
+            } catch (Exception e) {
+                runOnUiThread(() -> toast("保存失败: " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    /** SAF 导入拿不到真实路径时另存的目标：下载目录下的 <name>_edited.zip */
+    private File editOutputFile(File src) {
+        File dl = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS);
+        if (dl == null || !dl.isDirectory()) dl = getExternalFilesDir(null);
+        if (dl == null) dl = getCacheDir();
+        String base = src.getName();
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) base = base.substring(0, dot);
+        File f = new File(dl, base + "_edited.zip");
+        for (int i = 2; f.exists() && i < 100; i++) f = new File(dl, base + "_edited_" + i + ".zip");
+        return f;
+    }
+
+    /** 把编辑后的元素变换原地写回 anim.bin 字节，返回改写元素数 */
+    private int patchAnimBytes(byte[] anim) {
+        int patched = 0;
+        for (TexConverter.AAnim a : TexConverter.sAnim.anims) {
+            for (TexConverter.AFrame f : a.frames) {
+                for (TexConverter.AElement e : f.elems) {
+                    // 元素记录 40 字节: hash(4) buildFrame(4) layer(4) a,b,c,d(16) tx,ty,z(12)
+                    // txOffset 指向 tx，故除 hash 外都能原地改写
+                    if (e.txOffset < 28 || e.txOffset + 12 > anim.length) continue;
+                    putI(anim, e.txOffset - 24, e.buildFrame);
+                    putF(anim, e.txOffset - 16, e.a);
+                    putF(anim, e.txOffset - 12, e.b);
+                    putF(anim, e.txOffset - 8, e.c);
+                    putF(anim, e.txOffset - 4, e.d);
+                    putF(anim, e.txOffset, e.tx);
+                    putF(anim, e.txOffset + 4, e.ty);
+                    putF(anim, e.txOffset + 8, e.z);
+                    patched++;
+                }
+            }
+        }
+        return patched;
+    }
+
+    /** 用新的 anim.bin 替换压缩包内条目，其余条目原样复制 */
+    private static void repackZip(File src, byte[] anim, File dst) throws Exception {
+        ZipFile zf = new ZipFile(src);
         try {
-            byte[] anim = TexConverter.sAnimBytes;
-            if (anim == null) { toast("无 anim.bin 数据"); return; }
-            int patched = 0;
-            for (TexConverter.AAnim a : TexConverter.sAnim.anims) {
-                for (TexConverter.AFrame f : a.frames) {
-                    for (TexConverter.AElement e : f.elems) {
-                        if (e.txOffset < 28 || e.txOffset + 12 > anim.length) continue;
-                        // 元素记录 40 字节, txOffset 指向 tx; 除 hash 外全部可原地改写
-                        putI(anim, e.txOffset - 24, e.buildFrame);
-                        putF(anim, e.txOffset - 16, e.a);
-                        putF(anim, e.txOffset - 12, e.b);
-                        putF(anim, e.txOffset - 8, e.c);
-                        putF(anim, e.txOffset - 4, e.d);
-                        putF(anim, e.txOffset, e.tx);
-                        putF(anim, e.txOffset + 4, e.ty);
-                        putF(anim, e.txOffset + 8, e.z);
-                        patched++;
+            ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(dst));
+            try {
+                Enumeration<? extends ZipEntry> en = zf.entries();
+                while (en.hasMoreElements()) {
+                    ZipEntry ze = en.nextElement();
+                    ZipEntry ne = new ZipEntry(ze.getName());
+                    if (ze.getTime() > 0) ne.setTime(ze.getTime());
+                    zos.putNextEntry(ne);
+                    if (ze.getName().toLowerCase().endsWith("anim.bin")) {
+                        zos.write(anim);
+                    } else {
+                        InputStream in = zf.getInputStream(ze);
+                        byte[] buf = new byte[65536];
+                        int r;
+                        while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
+                        in.close();
                     }
+                    zos.closeEntry();
                 }
+            } finally {
+                zos.close();
             }
-            File zip = TexConverter.sAnimZip;
-            File tmp = new File(getCacheDir(), "edited.zip");
-            ZipFile zf = new ZipFile(zip);
-            ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(tmp));
-            Enumeration<? extends ZipEntry> en = zf.entries();
-            while (en.hasMoreElements()) {
-                ZipEntry ze = en.nextElement();
-                ZipEntry ne = new ZipEntry(ze.getName());
-                if (ze.getTime() > 0) ne.setTime(ze.getTime());
-                zos.putNextEntry(ne);
-                if (ze.getName().toLowerCase().endsWith("anim.bin")) {
-                    zos.write(anim);
-                } else {
-                    InputStream in = zf.getInputStream(ze);
-                    byte[] buf = new byte[65536];
-                    int r;
-                    while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
-                    in.close();
-                }
-                zos.closeEntry();
-            }
-            zos.close();
+        } finally {
             zf.close();
-            File bak = new File(zip.getAbsolutePath() + ".bak");
-            if (!bak.exists()) copyFile(zip, bak);
-            copyFile(tmp, zip);
-            tmp.delete();
-            toast("已保存: 改写 " + patched + " 个元素, 原包备份 .bak");
-        } catch (Exception e) {
-            toast("保存失败: " + e.getMessage());
         }
     }
 
