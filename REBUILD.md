@@ -43,6 +43,22 @@
 - native 编译加 `-Wl,-s`；`aapt2 link` 显式传 `--min-sdk-version/--target-sdk-version`；NDK 探测失败给明确错误而非静默退出。
 - 版本 1.4 → **1.5**（versionCode 6）。
 
+
+### 多选交互（用户反馈，v1.5 追加修复）
+
+**现象**：长按文件进入选择模式后，单点无法勾选，只能再长按。
+
+**根因**：`ListView` 用的是 `CHOICE_MODE_MULTIPLE`，该模式下 AbsListView 会在点击时**自己**切换勾选状态；
+而 `onItemClick` 里又做了一次 `setItemChecked(pos, !isItemChecked(pos))` → 两次取反互相抵消，
+勾选数恒为 0，紧接着触发"取消最后一个选中即退出多选"→ 每点一下都被弹回浏览模式。
+另外行是 `LinearLayout`（非 Checkable），框架不会刷新它的视觉状态，而代码只在 `getView` 里按勾选设背景，
+点击路径又没调 `invalidateViews()`，所以即使状态变了也看不见。
+
+**修法**：选中状态改由本类 `Set<Integer> sel` 自管，ListView 设为 `CHOICE_MODE_NONE`，
+所有 `isItemChecked/setItemChecked/getCheckedItemCount/clearChoices` 调用替换为
+`isSel/setSel/selCount/clearSel`，并在每次变更后 `refreshRows()`（invalidateViews）。
+顺带修掉搜索结果跳转时"偷偷勾选"导致残留勾选、下次批量转换误转的问题。
+
 ## 尚未处理（审查报告里的 P2/P3）
 
 - `parseBuild/parseAnim` 缺长度校验（伪造文件可 OOM/AIOOBE）

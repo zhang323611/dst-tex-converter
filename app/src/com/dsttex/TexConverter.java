@@ -57,6 +57,20 @@ public class TexConverter extends Activity {
     private boolean engineReady = false;
     private final List<File> entries = new ArrayList<>();
     private boolean multiSelect = false;
+    // 选中集合自己管理，不依赖 ListView 的 choiceMode。
+    // 起因(bug)：CHOICE_MODE_MULTIPLE 下 AbsListView 自己会在点击时切换勾选状态，
+    // 若点击回调里再 setItemChecked(!isItemChecked) 就会互相抵消 ——
+    // 表现为"长按进入选择模式后，单点毫无反应，只能再长按"，且行背景也不会刷新
+    // (行是 LinearLayout，不是 Checkable，框架不会更新它的视觉状态)。
+    private final java.util.Set<Integer> sel = new java.util.HashSet<>();
+
+    private boolean isSel(int pos) { return sel.contains(pos); }
+    private int selCount() { return sel.size(); }
+    private void setSel(int pos, boolean on) {
+        if (on) sel.add(pos); else sel.remove(pos);
+    }
+    private void clearSel() { sel.clear(); }
+    private void refreshRows() { if (listView != null) listView.invalidateViews(); }
     // DST 手游 .tex 的 comp=24 语义就是「ASTC 8x8」，KTEX 头不携带块尺寸信息。
     // 之前设置里提供了 4x4/6x6/10x10/12x12 五档，但 writeAstcHeader() 与 pitch/datasz
     // 全部按 8x8 写死 —— 选非 8x8 会产出「头部声称 8x8、数据是别的块尺寸」的废纹理，
@@ -207,7 +221,8 @@ public class TexConverter extends Activity {
         main.addView(divider());
 
         listView = new ListView(this);
-        listView.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
+        // 选中状态由本类的 sel 集合管理（见字段注释），ListView 只负责滚动/复用
+        listView.setChoiceMode(ListView.CHOICE_MODE_NONE);
         listView.setDivider(new ColorDrawable(C_DIVIDER));
         listView.setDividerHeight(dp(1));
         listView.setBackgroundColor(C_CARD);
@@ -760,10 +775,13 @@ public class TexConverter extends Activity {
                 File f = found.get(i);
                 highlightName = f.getName();
                 browse(f.getParentFile());
+                // 只滚动定位 + 提示，不做勾选：之前这里直接 setItemChecked，
+                // 会在多选模式下留下一批"幽灵勾选"，用户下次转换时被一起转掉
                 for (int j = 0; j < entries.size(); j++)
                     if (entries.get(j).getName().equals(highlightName)) {
-                        listView.setItemChecked(j, true);
                         listView.smoothScrollToPosition(j);
+                        toast("已定位: " + highlightName);
+                        break;
                     }
             })
             .setPositiveButton("确定", null).show();
@@ -808,29 +826,31 @@ public class TexConverter extends Activity {
     // ---------- 多选 ----------
     private void enterMultiSelect(int pos) {
         multiSelect = true;
-        listView.setItemChecked(pos, true);
-        listView.invalidateViews();
+        setSel(pos, true);
+        refreshRows();
         updateActionBar();
     }
 
     private void exitMultiSelect() {
         multiSelect = false;
-        listView.clearChoices();
-        listView.invalidateViews();
+        clearSel();
+        refreshRows();
         updateStatus();
         updateActionBar();
     }
 
     private void toggleAll() {
-        boolean all = listView.getCheckedItemCount() < entries.size();
-        for (int i = 0; i < entries.size(); i++) listView.setItemChecked(i, all);
+        boolean all = selCount() < entries.size();
+        clearSel();
+        if (all) for (int i = 0; i < entries.size(); i++) sel.add(i);
+        refreshRows();
         updateActionBar();
     }
 
     private void updateActionBar() {
         if (actionBar == null) return;
         actionBar.removeAllViews();
-        int checked = listView.getCheckedItemCount();
+        int checked = selCount();
         if (multiSelect && checked > 0) {
             actionBar.addView(barBtn(checked >= entries.size() ? "反选" : "全选", v -> toggleAll()));
             actionBar.addView(barBtn("转换", v -> convertSelected()));
@@ -859,10 +879,10 @@ public class TexConverter extends Activity {
     }
 
     private List<File> getSelected() {
-        List<File> sel = new ArrayList<>();
+        List<File> out = new ArrayList<>();
         for (int i = 0; i < entries.size(); i++)
-            if (listView.isItemChecked(i) && !entries.get(i).isDirectory()) sel.add(entries.get(i));
-        return sel;
+            if (isSel(i) && !entries.get(i).isDirectory()) out.add(entries.get(i));
+        return out;
     }
 
     private void renameSelected() {
@@ -924,7 +944,8 @@ public class TexConverter extends Activity {
                 }
             }
             listView.setAdapter(new FileAdapter());
-            listView.clearChoices();
+            clearSel();                 // 换了目录，旧下标失效，必须清空
+            refreshRows();
             updateStatus();
         } catch (Exception e) {
             toast("浏览失败: " + e.getMessage());
@@ -934,8 +955,11 @@ public class TexConverter extends Activity {
     private void onItemClick(AdapterView<?> p, View v, int pos, long id) {
         File f = entries.get(pos);
         if (multiSelect) {
-            listView.setItemChecked(pos, !listView.isItemChecked(pos));
-            if (listView.getCheckedItemCount() == 0) {
+            // 单点即可勾选/取消（此前 CHOICE_MODE_MULTIPLE 与这里的取反互相抵消，
+            // 导致"单点没反应、只能长按"）
+            setSel(pos, !isSel(pos));
+            refreshRows();
+            if (selCount() == 0) {
                 exitMultiSelect(); // 取消最后一个选中时自动退出多选
             } else {
                 updateActionBar();
@@ -1031,7 +1055,7 @@ public class TexConverter extends Activity {
                     new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
                         .format(new java.util.Date(f.lastModified())));
             }
-            row.setBackgroundColor(listView.isItemChecked(pos) ? C_SEL : 0x00000000);
+            row.setBackgroundColor(isSel(pos) ? C_SEL : 0x00000000);
             return row;
         }
     }
@@ -1768,7 +1792,7 @@ public class TexConverter extends Activity {
         final java.util.List<File> texFiles = new java.util.ArrayList<>();
         final java.util.List<File> zipFiles = new java.util.ArrayList<>();
         for (int i = 0; i < entries.size(); i++) {
-            if (!listView.isItemChecked(i)) continue;
+            if (!isSel(i)) continue;
             File f = entries.get(i);
             if (f.isDirectory()) collectTexRecursive(f, texFiles, zipFiles);
             else if (f.getName().toLowerCase().endsWith(".zip")) zipFiles.add(f);
