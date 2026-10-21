@@ -28,6 +28,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # build_apk.sh 在密钥不存在时会自动生成一个。若不缓存，每次构建都换新密钥，
+      # 装过旧版本的设备就无法覆盖升级。这里把 ~/.dsttex 固定下来。
+      - name: 恢复签名密钥
+        uses: actions/cache@v4
+        with:
+          path: ~/.dsttex
+          key: dsttex-keystore-v1
+
       - name: 检查预装 SDK / NDK
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
