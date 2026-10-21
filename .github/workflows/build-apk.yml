@@ -2,6 +2,10 @@ name: build-apk
 
 # 目的：在 GitHub 上跑真编译（本机无 JDK/NDK，本地只做了语法解析）。
 # 产物：dst_tex_converter.apk（artifact，保留 14 天）
+#
+# 说明：不使用 android-actions/setup-android —— 它依赖已下线的 cmdline-tools "tools" 包，
+# 在 2026 年的镜像上会直接失败。改为使用 ubuntu-latest 预装的 SDK
+# （build-tools 34.0.0 / platforms;android-34 / NDK 27.x 均已预装，免去 600MB 下载）。
 
 on:
   push:
@@ -24,22 +28,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 安装 Android SDK 工具
-        uses: android-actions/setup-android@v3
-
-      - name: 安装 SDK 组件（platform 34 / build-tools 34.0.0 / NDK r26）
+      - name: 检查预装 SDK / NDK
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          if ! sdkmanager "ndk;26.3.11579264" > /dev/null 2>&1; then
-            NV=$(sdkmanager --list 2>/dev/null | grep -oE 'ndk;26\.[0-9.]+' | sort -u | tail -1)
-            echo "pin 的 NDK 版本不可用，回退到 $NV"
-            sdkmanager "$NV"
-          fi
-          NDK_DIR=$(ls -d "$ANDROID_SDK_ROOT/ndk/"* | sort -V | tail -1)
-          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
-          echo "使用的 NDK: $NDK_DIR"
-          ls "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          # 缺包才装（正常都已预装）
+          [ -f "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2" ] || yes | sdkmanager "build-tools;34.0.0"
+          [ -f "$ANDROID_SDK_ROOT/platforms/android-34/android.jar" ] || yes | sdkmanager "platforms;android-34"
+          ls -l "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2" \
+                "$ANDROID_SDK_ROOT/platforms/android-34/android.jar"
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++" --version
+          javac -version
 
       # 先只编 Java：几十秒内暴露类型/语法错误，不必等 native 编完
       - name: javac 类型检查（快失败）
@@ -57,6 +56,7 @@ jobs:
         run: |
           ls -la dst_tex_converter.apk
           "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify --print-certs dst_tex_converter.apk
+          "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt2" dump badging dst_tex_converter.apk | head -20
           unzip -l dst_tex_converter.apk
 
       - name: 上传 APK
