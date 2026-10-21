@@ -235,9 +235,9 @@ public class AnimEditor extends Activity {
                 final boolean ok = TexConverter.loadAnimAsset(getApplicationContext(), tmp);
                 // 记住用户选择的真实文件 —— 否则"保存"只会改写 cacheDir 里的临时副本
                 final java.io.File real = resolveRealFile(uri);
-                TexConverter.sAnimSrc = real;
                 runOnUiThread(() -> {
                     if (!ok) { toast("导入失败: 不是有效的动画压缩包"); return; }
+                    TexConverter.sAnimSrc = real;   // 导入失败时不要动保存目标
                     frameIdx = 0; animIdx = 0;
                     view.sel = null;
                     syncFrameBar();

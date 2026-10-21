@@ -2271,7 +2271,15 @@ public class TexConverter extends Activity {
                 writeFile(t, data);
                 runTex2png(t.getAbsolutePath(), p.getAbsolutePath());
             }
-            return readAll(new FileInputStream(p));
+            // 与文件路径(TEX→PNG)保持一致: KTEX 是垂直翻转存储, 导出前翻正；
+            // 否则同一个 .tex 走"文件转换"和"zip 内转换"会得到上下颠倒的两张图。
+            File flipped = new File(tmpDir, "m_" + seq + "_f.png");
+            try {
+                flipPng(p, flipped);
+                return readAll(new FileInputStream(flipped));
+            } finally {
+                flipped.delete();
+            }
         } finally {
             t.delete(); p.delete(); astc.delete();
         }

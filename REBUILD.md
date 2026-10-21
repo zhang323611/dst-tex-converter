@@ -33,6 +33,7 @@
 - **`MANAGE_APP_ALL_FILES_ACCESS` 无 try/catch**：失败退化到应用详情页。
 - **临时 zip 放 cacheDir**：改为原文件同目录（不受 cache 配额限制 + rename 同分区原子 + 省一次整包拷贝）。
 - **`ok == 0` 也重写整个 zip**：无改动时保持原包不动。
+- **zip 内 TEX→PNG 未做垂直翻转**（与文件路径结果上下颠倒）：`texBytesToPng` 现已翻正。
 - **日志无上限**：`dsh_tex.log` 超过 2MB 自动轮转清理。
 
 ### 构建/清单
@@ -48,7 +49,7 @@
 - 大目录列表元数据缓存（`getView` 每行多次 stat + `new SimpleDateFormat`）
 - 首页 UI 线程递归搜索
 - 动画预览对话框 `weight=1` 画布高度可能为 0（需真机确认）
-- 每级 mip 的 PNG 中转 → 改 TGA；zip 内 `.tex` 用 `NO_COMPRESSION`；mip 用 `-fast`
+- 每级 mip 的 PNG 中转 → 改 TGA（注意 `texBytesToPng` 现在多了一次翻转用的解/编码）；zip 内 `.tex` 用 `NO_COMPRESSION`；mip 用 `-fast`
 - `AnimRenderer` 去掉 `LAYER_TYPE_SOFTWARE` 的可行性验证
 - 拆包（`TexConverter.java` 仍 2500+ 行）+ 引入 JUnit（格式解析最适合单测）
 - zip 条目权限位/extra field 保真
